@@ -165,16 +165,13 @@ ${sizeHint}
 ${sourceHint}
 
 Kritik kurallar:
-1) Her balon için TEK bir box ver. box, o balondaki ORİJİNAL YAZININ tamamını kapsasın (tüm satırlar, noktalama, son kelime dahil).
-2) box balonun İÇİNDE kalsın; siyah balon çerçevesini ve kuyruğu mümkün olduğunca dışarıda bırak. Ama yazının hiçbir parçası box dışında kalmasın.
-3) box değerleri 0–1000 arası tam sayı (x,y sol-üst; w,h boyut).
-4) Okuma sırası aynı kalsın (manga: sağdan sola, yukarıdan aşağı). readingOrder buna göre numaralandır.
+1) Her balon için TEK box: o balondaki ORİJİNAL YAZININ tamamını kapsasın (bütün satırlar ve son kelime).
+2) box balonun beyaz İÇİNDE olsun. Siyah çerçeveyi/kuyruğu mümkün olduğunca alma; yazı box dışında kalmasın.
+3) box 0–1000 tam sayı (x,y sol-üst; w,h boyut).
+4) readingOrder: manga sağdan sola / yukarıdan aşağı — mevcut okuma akışı bozulmasın.
 5) Hedef dil: ${targetLanguage}.
-6) translated, eski yazının kapladığı alanı dolduracak kadar kısa ve net olsun.
-   - Anlamı koru, gerekirse yoğunlaştır
-   - Orijinalden bariz uzun yazma
-   - Ton/ünlem korunsun
-7) Uydurma balon/metin yok.
+6) translated kısa ve net: balonun içine sığsın, anlam kalsın, gereksiz uzatma yok.
+7) Uydurma yok.
 
 SADECE JSON:
 {

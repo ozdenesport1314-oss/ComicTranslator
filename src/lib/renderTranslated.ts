@@ -10,21 +10,16 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
-function luminance(r: number, g: number, b: number) {
+function lumOf(r: number, g: number, b: number) {
   return 0.299 * r + 0.587 * g + 0.114 * b;
 }
 
 /**
- * Clean the original text region so none of it remains visible,
- * while avoiding a big rectangle that destroys the bubble outline.
- *
- * Strategy:
- * 1) Slightly expand the text box to catch full glyph bounds
- * 2) Build an ink mask + dilate it (kills anti-aliased letter edges)
- * 3) Flood-fill from the center through non-border pixels and whiten
- * 4) Force-whiten the core of the text box (guarantees full cover)
+ * Completely wipe original text inside the bubble region.
+ * Keeps only very-dark strokes on the outer ring (bubble outline).
+ * Everything else in the region becomes white — no leftover English.
  */
-function cleanOriginalTextRegion(
+function wipeBubbleInterior(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
@@ -33,119 +28,87 @@ function cleanOriginalTextRegion(
 ) {
   const ix = Math.max(0, Math.floor(x));
   const iy = Math.max(0, Math.floor(y));
-  const iw = Math.max(1, Math.floor(w));
-  const ih = Math.max(1, Math.floor(h));
+  const iw = Math.max(1, Math.ceil(w));
+  const ih = Math.max(1, Math.ceil(h));
   if (iw < 3 || ih < 3) return;
 
   const imageData = ctx.getImageData(ix, iy, iw, ih);
   const { data } = imageData;
-  const n = iw * ih;
-  const lum = new Float32Array(n);
+  const count = iw * ih;
+  const lum = new Float32Array(count);
 
-  for (let p = 0; p < n; p += 1) {
+  for (let p = 0; p < count; p += 1) {
     const i = p * 4;
-    lum[p] = luminance(data[i], data[i + 1], data[i + 2]);
+    lum[p] = lumOf(data[i], data[i + 1], data[i + 2]);
   }
 
-  // Paper tone from brightest pixels
-  const sorted = Float32Array.from(lum).sort();
-  const brightStart = Math.floor(n * 0.65);
-  let bgSum = 0;
-  let bgCount = 0;
-  for (let i = brightStart; i < n; i += 1) {
-    bgSum += sorted[i];
-    bgCount += 1;
-  }
-  const bg = bgCount ? bgSum / bgCount : 250;
-  const inkCut = Math.min(205, bg - 22);
-  const borderCut = 55; // very dark = likely balloon outline
+  // Outer ring where bubble outline may sit — keep only hard black strokes there
+  const ringX = Math.max(2, Math.floor(iw * 0.1));
+  const ringY = Math.max(2, Math.floor(ih * 0.1));
+  const outlineCut = 48;
 
-  // Ink mask
-  const ink = new Uint8Array(n);
-  for (let p = 0; p < n; p += 1) {
-    if (lum[p] < inkCut) ink[p] = 1;
-  }
+  // Mark outline candidates: very dark pixels on the ring, connected to the rect border
+  const outline = new Uint8Array(count);
+  const stack: number[] = [];
 
-  // Dilate ink 2px so gray letter edges disappear
-  const dilated = new Uint8Array(n);
-  const rad = 2;
+  const pushIfOutlineSeed = (col: number, row: number) => {
+    if (col < 0 || row < 0 || col >= iw || row >= ih) return;
+    const p = row * iw + col;
+    if (lum[p] <= outlineCut) stack.push(p);
+  };
+
+  for (let col = 0; col < iw; col += 1) {
+    pushIfOutlineSeed(col, 0);
+    pushIfOutlineSeed(col, ih - 1);
+  }
   for (let row = 0; row < ih; row += 1) {
-    for (let col = 0; col < iw; col += 1) {
-      let hit = 0;
-      for (let dy = -rad; dy <= rad && !hit; dy += 1) {
-        for (let dx = -rad; dx <= rad; dx += 1) {
-          const yy = row + dy;
-          const xx = col + dx;
-          if (yy < 0 || xx < 0 || yy >= ih || xx >= iw) continue;
-          if (ink[yy * iw + xx]) {
-            hit = 1;
-            break;
-          }
-        }
-      }
-      dilated[row * iw + col] = hit;
-    }
+    pushIfOutlineSeed(0, row);
+    pushIfOutlineSeed(iw - 1, row);
   }
 
-  // Flood fill from a bright seed near center through non-border pixels
-  const fill = new Uint8Array(n);
-  const seedCandidates: Array<[number, number]> = [
-    [Math.floor(iw / 2), Math.floor(ih / 2)],
-    [Math.floor(iw * 0.4), Math.floor(ih * 0.4)],
-    [Math.floor(iw * 0.6), Math.floor(ih * 0.4)],
-    [Math.floor(iw * 0.5), Math.floor(ih * 0.6)],
-  ];
-
-  let seed: [number, number] | null = null;
-  for (const [sx, sy] of seedCandidates) {
-    if (lum[sy * iw + sx] > borderCut + 30) {
-      seed = [sx, sy];
-      break;
-    }
-  }
-  if (!seed) seed = seedCandidates[0];
-
-  const stack = [seed[0], seed[1]];
   while (stack.length) {
-    const cy = stack.pop() as number;
-    const cx = stack.pop() as number;
-    if (cx < 0 || cy < 0 || cx >= iw || cy >= ih) continue;
-    const p = cy * iw + cx;
-    if (fill[p]) continue;
-    if (lum[p] < borderCut) continue; // stop at hard outline
-    fill[p] = 1;
-    stack.push(cx + 1, cy, cx - 1, cy, cx, cy + 1, cx, cy - 1);
+    const p = stack.pop() as number;
+    if (outline[p]) continue;
+    if (lum[p] > outlineCut) continue;
+
+    const row = Math.floor(p / iw);
+    const col = p - row * iw;
+    const onRing =
+      col < ringX || col >= iw - ringX || row < ringY || row >= ih - ringY;
+    // Only grow outline along the ring / near border so inner text isn't "outline"
+    if (!onRing) continue;
+
+    outline[p] = 1;
+    const neighbors = [p - 1, p + 1, p - iw, p + iw, p - iw - 1, p - iw + 1, p + iw - 1, p + iw + 1];
+    for (const n of neighbors) {
+      if (n < 0 || n >= count) continue;
+      const nr = Math.floor(n / iw);
+      const nc = n - nr * iw;
+      if (Math.abs(nr - row) > 1 || Math.abs(nc - col) > 1) continue;
+      if (!outline[n] && lum[n] <= outlineCut) stack.push(n);
+    }
   }
 
-  const corePadX = Math.max(1, Math.floor(iw * 0.08));
-  const corePadY = Math.max(1, Math.floor(ih * 0.08));
+  // Wipe everything that is not preserved outline
+  for (let p = 0; p < count; p += 1) {
+    if (outline[p]) continue;
+    const i = p * 4;
+    data[i] = 255;
+    data[i + 1] = 255;
+    data[i + 2] = 255;
+    data[i + 3] = 255;
+  }
 
-  for (let row = 0; row < ih; row += 1) {
-    for (let col = 0; col < iw; col += 1) {
+  // Second pass: kill tiny dark speckles left inside (orphan ink)
+  for (let row = 1; row < ih - 1; row += 1) {
+    for (let col = 1; col < iw - 1; col += 1) {
       const p = row * iw + col;
+      if (outline[p]) continue;
       const i = p * 4;
-      const inCore =
-        col >= corePadX &&
-        col < iw - corePadX &&
-        row >= corePadY &&
-        row < ih - corePadY;
-
-      // Whiten if: dilated ink, flood interior, or forced core (full text cover)
-      const shouldWhiten = dilated[p] || fill[p] || inCore;
-      if (!shouldWhiten) continue;
-
-      // Preserve only hard border pixels on the outer ring
-      const onRing =
-        col < corePadX ||
-        col >= iw - corePadX ||
-        row < corePadY ||
-        row >= ih - corePadY;
-      if (onRing && lum[p] < borderCut) continue;
-
+      // already white from pass 1; re-assert for safety
       data[i] = 255;
       data[i + 1] = 255;
       data[i + 2] = 255;
-      data[i + 3] = 255;
     }
   }
 
@@ -192,7 +155,7 @@ function textFits(
 ): { ok: boolean; lines: string[] } {
   ctx.font = `700 ${fontSize}px Arial, "Helvetica Neue", sans-serif`;
   const lines = wrapText(ctx, text, maxWidth);
-  const lineHeight = fontSize * 1.1;
+  const lineHeight = fontSize * 1.12;
   const totalHeight = lines.length * lineHeight;
   const widest = Math.max(...lines.map((line) => ctx.measureText(line).width), 0);
   return {
@@ -254,12 +217,12 @@ function fitAndDrawText(
   w: number,
   h: number,
 ) {
-  const padX = Math.max(2, w * 0.08);
-  const padY = Math.max(2, h * 0.08);
+  const padX = Math.max(3, w * 0.12);
+  const padY = Math.max(3, h * 0.12);
   const maxWidth = Math.max(8, w - padX * 2);
   const maxHeight = Math.max(8, h - padY * 2);
-  const minFont = Math.max(10, Math.min(15, h * 0.15));
-  const maxFont = Math.max(minFont + 1, Math.min(70, h * 0.45));
+  const minFont = Math.max(10, Math.min(16, h * 0.16));
+  const maxFont = Math.max(minFont + 1, Math.min(68, h * 0.42));
 
   const fittedText = condenseToFit(ctx, text, maxWidth, maxHeight, minFont);
 
@@ -280,18 +243,12 @@ function fitAndDrawText(
     }
   }
 
-  // Soft white backing only behind glyphs (same box), no rounded card
-  ctx.save();
-  ctx.fillStyle = "rgba(255,255,255,0.92)";
-  ctx.fillRect(x + padX * 0.35, y + padY * 0.35, w - padX * 0.7, h - padY * 0.7);
-  ctx.restore();
-
   ctx.font = `700 ${bestSize}px Arial, "Helvetica Neue", sans-serif`;
   ctx.fillStyle = "#111111";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
 
-  const lineHeight = bestSize * 1.1;
+  const lineHeight = bestSize * 1.12;
   const totalHeight = bestLines.length * lineHeight;
   let cursorY = y + h / 2 - totalHeight / 2 + lineHeight / 2;
 
@@ -326,23 +283,24 @@ export async function renderTranslatedPage(
   for (const bubble of ordered) {
     if (!bubble.translated?.trim() || !bubble.box) continue;
 
-    // Clean a bit larger than text so leftover English can't peek out
-    const cleanBox = expandBox(bubble.box, 0.1);
-    const drawBox = insetBox(bubble.box, 0.02);
+    // Wipe a bit larger than detected text so no English peeks out
+    const wipe = expandBox(bubble.box, 0.14);
+    // Draw a bit inset so letters stay inside the cleaned bubble
+    const draw = insetBox(bubble.box, 0.04);
 
-    const cx = cleanBox.x * width;
-    const cy = cleanBox.y * height;
-    const cw = cleanBox.w * width;
-    const ch = cleanBox.h * height;
+    const wx = wipe.x * width;
+    const wy = wipe.y * height;
+    const ww = wipe.w * width;
+    const wh = wipe.h * height;
 
-    const dx = drawBox.x * width;
-    const dy = drawBox.y * height;
-    const dw = drawBox.w * width;
-    const dh = drawBox.h * height;
+    const dx = draw.x * width;
+    const dy = draw.y * height;
+    const dw = draw.w * width;
+    const dh = draw.h * height;
 
-    if (cw < 2 || ch < 2 || dw < 2 || dh < 2) continue;
+    if (ww < 2 || wh < 2 || dw < 2 || dh < 2) continue;
 
-    cleanOriginalTextRegion(ctx, cx, cy, cw, ch);
+    wipeBubbleInterior(ctx, wx, wy, ww, wh);
     fitAndDrawText(ctx, bubble.translated, dx, dy, dw, dh);
     painted += 1;
   }
