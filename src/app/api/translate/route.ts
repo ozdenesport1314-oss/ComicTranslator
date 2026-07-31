@@ -189,7 +189,9 @@ Kurallar:
 2) textBox her zaman bubbleBox'un İÇİNDE olsun.
 3) readingOrder: manga sağdan sola / yukarıdan aşağı — akış bozulmasın.
 4) Hedef dil: ${targetLanguage}.
-5) translated kısa/net, balona sığsın; uzarsa anlamı koruyarak kısalt.
+5) translated profesyonel çizgi roman diyaloğu gibi olsun:
+   - Kısa, vurucu, doğal (ör. "NE DİYORSUN SEN YA?", "BİR... BATMAN.")
+   - Balona sığsın; uzarsa anlamı koruyarak kısalt
 6) Uydurma yok.
 
 SADECE JSON:

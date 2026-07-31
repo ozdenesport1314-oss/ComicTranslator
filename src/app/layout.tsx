@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Figtree, Sora } from "next/font/google";
+import { Bangers, Comic_Neue, Figtree, Sora } from "next/font/google";
 import { Header } from "@/components/Header";
 import "./globals.css";
 
@@ -15,6 +15,18 @@ const body = Figtree({
   weight: ["400", "500", "600", "700"],
 });
 
+const comic = Bangers({
+  variable: "--font-comic",
+  subsets: ["latin"],
+  weight: "400",
+});
+
+const comicNeue = Comic_Neue({
+  variable: "--font-comic-neue",
+  subsets: ["latin"],
+  weight: ["700"],
+});
+
 export const metadata: Metadata = {
   title: "ComicTranslator — Manga baloncuk çevirisi",
   description:
@@ -27,7 +39,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="tr" className={`${display.variable} ${body.variable} h-full`}>
+    <html
+      lang="tr"
+      className={`${display.variable} ${body.variable} ${comic.variable} ${comicNeue.variable} h-full`}
+    >
       <body className="min-h-full antialiased">
         <Header />
         <main className="page-shell pb-16 pt-2">{children}</main>
