@@ -1,4 +1,4 @@
-import { insetBox } from "./boxes";
+import { expandBox, insetBox } from "./boxes";
 import type { BubbleTranslation } from "./types";
 
 function loadImage(src: string): Promise<HTMLImageElement> {
@@ -10,11 +10,21 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
+function luminance(r: number, g: number, b: number) {
+  return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
 /**
- * Erase only dark ink (text) inside the region.
- * Keeps light bubble fill and avoids painting a solid white rectangle over the art/border.
+ * Clean the original text region so none of it remains visible,
+ * while avoiding a big rectangle that destroys the bubble outline.
+ *
+ * Strategy:
+ * 1) Slightly expand the text box to catch full glyph bounds
+ * 2) Build an ink mask + dilate it (kills anti-aliased letter edges)
+ * 3) Flood-fill from the center through non-border pixels and whiten
+ * 4) Force-whiten the core of the text box (guarantees full cover)
  */
-function eraseTextInk(
+function cleanOriginalTextRegion(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
@@ -25,54 +35,117 @@ function eraseTextInk(
   const iy = Math.max(0, Math.floor(y));
   const iw = Math.max(1, Math.floor(w));
   const ih = Math.max(1, Math.floor(h));
-  if (iw < 2 || ih < 2) return;
+  if (iw < 3 || ih < 3) return;
 
   const imageData = ctx.getImageData(ix, iy, iw, ih);
-  const data = imageData.data;
-  const luminances: number[] = [];
+  const { data } = imageData;
+  const n = iw * ih;
+  const lum = new Float32Array(n);
 
-  for (let i = 0; i < data.length; i += 4) {
-    luminances.push(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+  for (let p = 0; p < n; p += 1) {
+    const i = p * 4;
+    lum[p] = luminance(data[i], data[i + 1], data[i + 2]);
   }
 
-  // Background ≈ bright end of the region (speech bubbles are usually white/cream)
-  const sorted = [...luminances].sort((a, b) => a - b);
-  const brightStart = Math.floor(sorted.length * 0.7);
+  // Paper tone from brightest pixels
+  const sorted = Float32Array.from(lum).sort();
+  const brightStart = Math.floor(n * 0.65);
   let bgSum = 0;
   let bgCount = 0;
-  for (let i = brightStart; i < sorted.length; i += 1) {
+  for (let i = brightStart; i < n; i += 1) {
     bgSum += sorted[i];
     bgCount += 1;
   }
-  const bg = bgCount ? bgSum / bgCount : 245;
-  const inkThreshold = Math.min(210, bg - 28);
+  const bg = bgCount ? bgSum / bgCount : 250;
+  const inkCut = Math.min(205, bg - 22);
+  const borderCut = 55; // very dark = likely balloon outline
 
-  const edgeX = Math.max(1, Math.floor(iw * 0.08));
-  const edgeY = Math.max(1, Math.floor(ih * 0.08));
+  // Ink mask
+  const ink = new Uint8Array(n);
+  for (let p = 0; p < n; p += 1) {
+    if (lum[p] < inkCut) ink[p] = 1;
+  }
+
+  // Dilate ink 2px so gray letter edges disappear
+  const dilated = new Uint8Array(n);
+  const rad = 2;
+  for (let row = 0; row < ih; row += 1) {
+    for (let col = 0; col < iw; col += 1) {
+      let hit = 0;
+      for (let dy = -rad; dy <= rad && !hit; dy += 1) {
+        for (let dx = -rad; dx <= rad; dx += 1) {
+          const yy = row + dy;
+          const xx = col + dx;
+          if (yy < 0 || xx < 0 || yy >= ih || xx >= iw) continue;
+          if (ink[yy * iw + xx]) {
+            hit = 1;
+            break;
+          }
+        }
+      }
+      dilated[row * iw + col] = hit;
+    }
+  }
+
+  // Flood fill from a bright seed near center through non-border pixels
+  const fill = new Uint8Array(n);
+  const seedCandidates: Array<[number, number]> = [
+    [Math.floor(iw / 2), Math.floor(ih / 2)],
+    [Math.floor(iw * 0.4), Math.floor(ih * 0.4)],
+    [Math.floor(iw * 0.6), Math.floor(ih * 0.4)],
+    [Math.floor(iw * 0.5), Math.floor(ih * 0.6)],
+  ];
+
+  let seed: [number, number] | null = null;
+  for (const [sx, sy] of seedCandidates) {
+    if (lum[sy * iw + sx] > borderCut + 30) {
+      seed = [sx, sy];
+      break;
+    }
+  }
+  if (!seed) seed = seedCandidates[0];
+
+  const stack = [seed[0], seed[1]];
+  while (stack.length) {
+    const cy = stack.pop() as number;
+    const cx = stack.pop() as number;
+    if (cx < 0 || cy < 0 || cx >= iw || cy >= ih) continue;
+    const p = cy * iw + cx;
+    if (fill[p]) continue;
+    if (lum[p] < borderCut) continue; // stop at hard outline
+    fill[p] = 1;
+    stack.push(cx + 1, cy, cx - 1, cy, cx, cy + 1, cx, cy - 1);
+  }
+
+  const corePadX = Math.max(1, Math.floor(iw * 0.08));
+  const corePadY = Math.max(1, Math.floor(ih * 0.08));
 
   for (let row = 0; row < ih; row += 1) {
     for (let col = 0; col < iw; col += 1) {
-      const idx = (row * iw + col) * 4;
-      const lum = luminances[row * iw + col];
-      const nearEdge =
-        col < edgeX || col >= iw - edgeX || row < edgeY || row >= ih - edgeY;
+      const p = row * iw + col;
+      const i = p * 4;
+      const inCore =
+        col >= corePadX &&
+        col < iw - corePadX &&
+        row >= corePadY &&
+        row < ih - corePadY;
 
-      // Near edges: only erase medium-dark text, keep very dark outline strokes
-      if (nearEdge) {
-        if (lum < inkThreshold && lum > 40) {
-          data[idx] = 255;
-          data[idx + 1] = 255;
-          data[idx + 2] = 255;
-        }
-        continue;
-      }
+      // Whiten if: dilated ink, flood interior, or forced core (full text cover)
+      const shouldWhiten = dilated[p] || fill[p] || inCore;
+      if (!shouldWhiten) continue;
 
-      // Interior: erase ink, keep paper
-      if (lum < inkThreshold) {
-        data[idx] = 255;
-        data[idx + 1] = 255;
-        data[idx + 2] = 255;
-      }
+      // Preserve only hard border pixels on the outer ring
+      const onRing =
+        col < corePadX ||
+        col >= iw - corePadX ||
+        row < corePadY ||
+        row >= ih - corePadY;
+      if (onRing && lum[p] < borderCut) continue;
+
+      data[i] = 255;
+      data[i + 1] = 255;
+      data[i + 2] = 255;
+      data[i + 3] = 255;
     }
   }
 
@@ -119,7 +192,7 @@ function textFits(
 ): { ok: boolean; lines: string[] } {
   ctx.font = `700 ${fontSize}px Arial, "Helvetica Neue", sans-serif`;
   const lines = wrapText(ctx, text, maxWidth);
-  const lineHeight = fontSize * 1.12;
+  const lineHeight = fontSize * 1.1;
   const totalHeight = lines.length * lineHeight;
   const widest = Math.max(...lines.map((line) => ctx.measureText(line).width), 0);
   return {
@@ -128,7 +201,6 @@ function textFits(
   };
 }
 
-/** Condense translation so it can fit the bubble without changing overall meaning too much. */
 function condenseToFit(
   ctx: CanvasRenderingContext2D,
   text: string,
@@ -141,11 +213,8 @@ function condenseToFit(
     .replace(/\s*\.\.\.\s*/g, "…")
     .trim();
 
-  if (textFits(ctx, candidate, maxWidth, maxHeight, minFont).ok) {
-    return candidate;
-  }
+  if (textFits(ctx, candidate, maxWidth, maxHeight, minFont).ok) return candidate;
 
-  // Drop soft filler words common in Turkish expansions
   candidate = candidate
     .replace(
       /\b(gerçekten|aslında|açıkçası|şöyle ki|yani|işte|biraz|oldukça|kesinlikle)\b/gi,
@@ -155,11 +224,8 @@ function condenseToFit(
     .replace(/\s+([,.…!?])/g, "$1")
     .trim();
 
-  if (textFits(ctx, candidate, maxWidth, maxHeight, minFont).ok) {
-    return candidate;
-  }
+  if (textFits(ctx, candidate, maxWidth, maxHeight, minFont).ok) return candidate;
 
-  // Keep as many leading words as fit
   const words = candidate.split(/\s+/).filter(Boolean);
   let low = 1;
   let high = words.length;
@@ -188,12 +254,12 @@ function fitAndDrawText(
   w: number,
   h: number,
 ) {
-  const padX = Math.max(2, w * 0.1);
-  const padY = Math.max(2, h * 0.1);
+  const padX = Math.max(2, w * 0.08);
+  const padY = Math.max(2, h * 0.08);
   const maxWidth = Math.max(8, w - padX * 2);
   const maxHeight = Math.max(8, h - padY * 2);
-  const minFont = Math.max(9, Math.min(14, h * 0.14));
-  const maxFont = Math.max(minFont + 1, Math.min(64, h * 0.42));
+  const minFont = Math.max(10, Math.min(15, h * 0.15));
+  const maxFont = Math.max(minFont + 1, Math.min(70, h * 0.45));
 
   const fittedText = condenseToFit(ctx, text, maxWidth, maxHeight, minFont);
 
@@ -214,12 +280,18 @@ function fitAndDrawText(
     }
   }
 
+  // Soft white backing only behind glyphs (same box), no rounded card
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,0.92)";
+  ctx.fillRect(x + padX * 0.35, y + padY * 0.35, w - padX * 0.7, h - padY * 0.7);
+  ctx.restore();
+
   ctx.font = `700 ${bestSize}px Arial, "Helvetica Neue", sans-serif`;
   ctx.fillStyle = "#111111";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
 
-  const lineHeight = bestSize * 1.12;
+  const lineHeight = bestSize * 1.1;
   const totalHeight = bestLines.length * lineHeight;
   let cursorY = y + h / 2 - totalHeight / 2 + lineHeight / 2;
 
@@ -248,23 +320,30 @@ export async function renderTranslatedPage(
 
   ctx.drawImage(img, 0, 0, width, height);
 
-  // Keep reading order stable: sort, then paint
   const ordered = [...bubbles].sort((a, b) => a.readingOrder - b.readingOrder);
 
   let painted = 0;
   for (const bubble of ordered) {
     if (!bubble.translated?.trim() || !bubble.box) continue;
 
-    // Slight inset: stay inside bubble, protect outline
-    const box = insetBox(bubble.box, 0.06);
-    const x = box.x * width;
-    const y = box.y * height;
-    const w = box.w * width;
-    const h = box.h * height;
-    if (w < 2 || h < 2) continue;
+    // Clean a bit larger than text so leftover English can't peek out
+    const cleanBox = expandBox(bubble.box, 0.1);
+    const drawBox = insetBox(bubble.box, 0.02);
 
-    eraseTextInk(ctx, x, y, w, h);
-    fitAndDrawText(ctx, bubble.translated, x, y, w, h);
+    const cx = cleanBox.x * width;
+    const cy = cleanBox.y * height;
+    const cw = cleanBox.w * width;
+    const ch = cleanBox.h * height;
+
+    const dx = drawBox.x * width;
+    const dy = drawBox.y * height;
+    const dw = drawBox.w * width;
+    const dh = drawBox.h * height;
+
+    if (cw < 2 || ch < 2 || dw < 2 || dh < 2) continue;
+
+    cleanOriginalTextRegion(ctx, cx, cy, cw, ch);
+    fitAndDrawText(ctx, bubble.translated, dx, dy, dw, dh);
     painted += 1;
   }
 

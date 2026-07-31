@@ -159,30 +159,31 @@ export async function POST(request: Request) {
         ? `Görsel boyutu yaklaşık ${imageWidth}x${imageHeight}px.`
         : "";
 
-    const prompt = `Sen bir manga/çizgi roman çevirmenisin. Konuşma/düşünce baloncuklarındaki ve önemli panel yazılarındaki metinleri bul.
+    const prompt = `Sen bir manga/çizgi roman çevirmenisin. Her balondaki metni bul; sonra o metnin yerini tamamen kaplayacak şekilde çeviri üret.
 
 ${sizeHint}
 ${sourceHint}
 
 Kritik kurallar:
-1) box SADECE metnin olduğu iç bölgeyi sarsın. Balonun siyah çerçevesini, kuyruğunu ve dışını KAPLAMASIN. Kutuyu balonun içine, yazının etrafına sıkıca koy.
-2) box değerleri 0–1000 arası tam sayı olsun (x,y sol-üst; w,h boyut).
-3) Okuma sırası aynı kalsın (manga: sağdan sola, yukarıdan aşağı). readingOrder buna göre.
-4) Hedef dil: ${targetLanguage}.
-5) Çeviri balona SIĞMALI. Hedef dilde uzayacaksa anlamı kaybetmeden KISALT / yoğunlaştır.
-   - Orijinalden belirgin şekilde uzun yazma
-   - Gereksiz doldurma yok
-   - Ünlem/ton korunsun
-6) Uydurma metin yok. Balon çerçevesini “düzeltme” veya yeniden çizme.
+1) Her balon için TEK bir box ver. box, o balondaki ORİJİNAL YAZININ tamamını kapsasın (tüm satırlar, noktalama, son kelime dahil).
+2) box balonun İÇİNDE kalsın; siyah balon çerçevesini ve kuyruğu mümkün olduğunca dışarıda bırak. Ama yazının hiçbir parçası box dışında kalmasın.
+3) box değerleri 0–1000 arası tam sayı (x,y sol-üst; w,h boyut).
+4) Okuma sırası aynı kalsın (manga: sağdan sola, yukarıdan aşağı). readingOrder buna göre numaralandır.
+5) Hedef dil: ${targetLanguage}.
+6) translated, eski yazının kapladığı alanı dolduracak kadar kısa ve net olsun.
+   - Anlamı koru, gerekirse yoğunlaştır
+   - Orijinalden bariz uzun yazma
+   - Ton/ünlem korunsun
+7) Uydurma balon/metin yok.
 
 SADECE JSON:
 {
   "bubbles": [
     {
-      "original": "orijinal metin",
-      "translated": "kısa ve balona sığan çeviri",
+      "original": "orijinal metnin tamamı",
+      "translated": "kısa, net, balona sığan çeviri",
       "readingOrder": 1,
-      "box": { "x": 120, "y": 80, "w": 220, "h": 140 }
+      "box": { "x": 120, "y": 80, "w": 240, "h": 160 }
     }
   ]
 }
