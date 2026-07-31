@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
+import { normalizeBubbleBox } from "@/lib/boxes";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -12,6 +13,8 @@ type TranslateBody = {
   mimeType: string;
   targetLanguage: string;
   sourceLanguage?: string;
+  imageWidth?: number;
+  imageHeight?: number;
 };
 
 type BubbleResult = {
@@ -27,37 +30,11 @@ function stripCodeFence(text: string): string {
   return fenced ? fenced[1].trim() : trimmed;
 }
 
-function clamp01(n: number) {
-  if (!Number.isFinite(n)) return 0;
-  return Math.min(1, Math.max(0, n));
-}
-
-function normalizeBox(raw: unknown): BubbleResult["box"] | null {
-  if (!raw || typeof raw !== "object") return null;
-  const box = raw as Record<string, unknown>;
-  const x = Number(box.x);
-  const y = Number(box.y);
-  const w = Number(box.w ?? box.width);
-  const h = Number(box.h ?? box.height);
-  if (![x, y, w, h].every((v) => Number.isFinite(v))) return null;
-  if (w <= 0 || h <= 0) return null;
-
-  // Accept either 0–1 normalized or 0–100 percentage
-  const scale = Math.max(x, y, w, h) > 1.5 ? 100 : 1;
-  const nx = clamp01(x / scale);
-  const ny = clamp01(y / scale);
-  const nw = clamp01(w / scale);
-  const nh = clamp01(h / scale);
-  if (nw < 0.01 || nh < 0.01) return null;
-  return {
-    x: nx,
-    y: ny,
-    w: Math.min(nw, 1 - nx),
-    h: Math.min(nh, 1 - ny),
-  };
-}
-
-function parseBubbles(raw: string): BubbleResult[] {
+function parseBubbles(
+  raw: string,
+  imageWidth?: number,
+  imageHeight?: number,
+): BubbleResult[] {
   const cleaned = stripCodeFence(raw);
   const parsed = JSON.parse(cleaned) as { bubbles?: unknown[] } | unknown[];
   const bubbles = Array.isArray(parsed) ? parsed : parsed.bubbles;
@@ -69,11 +46,17 @@ function parseBubbles(raw: string): BubbleResult[] {
     .map((item, index) => {
       if (!item || typeof item !== "object") return null;
       const b = item as Record<string, unknown>;
-      const original = String(b.original ?? "").trim();
-      const translated = String(b.translated ?? "").trim();
+      const original = String(b.original ?? b.source ?? b.text ?? "").trim();
+      const translated = String(b.translated ?? b.translation ?? b.target ?? "").trim();
       if (!original || !translated) return null;
-      const box = normalizeBox(b.box);
+
+      // Prefer nested box; also accept top-level coordinates
+      const box =
+        normalizeBubbleBox(b.box ?? b.bbox ?? b.boundingBox, imageWidth, imageHeight) ??
+        normalizeBubbleBox(b, imageWidth, imageHeight);
+
       if (!box) return null;
+
       return {
         original,
         translated,
@@ -108,12 +91,14 @@ async function generateWithModel(params: {
   prompt: string;
   mimeType: string;
   base64Data: string;
+  imageWidth?: number;
+  imageHeight?: number;
 }) {
   const genAI = new GoogleGenerativeAI(params.apiKey);
   const model = genAI.getGenerativeModel({
     model: params.modelName,
     generationConfig: {
-      temperature: 0.2,
+      temperature: 0.1,
       responseMimeType: "application/json",
     },
   });
@@ -130,7 +115,7 @@ async function generateWithModel(params: {
     },
   ]);
 
-  return parseBubbles(result.response.text());
+  return parseBubbles(result.response.text(), params.imageWidth, params.imageHeight);
 }
 
 export async function POST(request: Request) {
@@ -144,7 +129,14 @@ export async function POST(request: Request) {
     }
 
     const body = (await request.json()) as TranslateBody;
-    const { imageBase64, mimeType, targetLanguage, sourceLanguage } = body;
+    const {
+      imageBase64,
+      mimeType,
+      targetLanguage,
+      sourceLanguage,
+      imageWidth,
+      imageHeight,
+    } = body;
 
     if (!imageBase64 || !mimeType || !targetLanguage) {
       return NextResponse.json(
@@ -162,33 +154,40 @@ export async function POST(request: Request) {
         ? `Kaynak dil: ${sourceLanguage}.`
         : "Kaynak dili otomatik algıla.";
 
+    const sizeHint =
+      imageWidth && imageHeight
+        ? `Görsel boyutu yaklaşık ${imageWidth}x${imageHeight}px.`
+        : "";
+
     const prompt = `Sen bir manga/çizgi roman çevirmenisin. Bu sayfadaki konuşma baloncukları, düşünce baloncukları, ses efektleri (SFX) ve panellerdeki önemli yazıları bul.
 
-Görev:
-1) Her metin bölgesinin sınır kutusunu (bounding box) ver.
-2) box değerleri NORMALİZE edilmiş olsun: x,y,w,h hepsi 0 ile 1 arasında (görsel genişlik/yüksekliğine oran).
-   - x,y = kutunun sol-üst köşesi
-   - w,h = genişlik ve yükseklik
-   - Kutu metnin tamamını ve biraz boşluğu kapsasın; balon çerçevesini mümkün olduğunca dışarıda bırak.
-3) Metinleri okuma sırasına göre çıkar (manga: sağdan sola / yukarıdan aşağı; batı: soldan sağa).
-4) Her metni hedef dile çevir: ${targetLanguage}.
-5) ${sourceHint}
-6) Karakter tarzını ve manga tonunu koru. Uydurma metin ekleme.
-7) Çeviriyi balona sığacak kadar kısa/doğal tut.
+${sizeHint}
+${sourceHint}
 
-Yanıtı SADECE şu JSON şemasında ver:
+Görev:
+1) Her metin için bounding box ver.
+2) box değerlerini 0 ile 1000 arasında TAM SAYI olarak ver (görsele oranla):
+   - x,y = sol-üst köşe (0–1000)
+   - w,h = genişlik ve yükseklik (0–1000)
+   Örnek: görselin sol üst çeyreği ≈ {"x":50,"y":40,"w":300,"h":180}
+3) Kutu metni tam kapsasın; balonun içini kaplasın.
+4) Okuma sırası: manga sağdan sola / yukarıdan aşağı.
+5) Hedef dil: ${targetLanguage}.
+6) Uydurma metin yok. Çeviriyi balona sığacak kadar kısa tut.
+
+SADECE JSON:
 {
   "bubbles": [
     {
       "original": "orijinal metin",
       "translated": "çevrilmiş metin",
       "readingOrder": 1,
-      "box": { "x": 0.12, "y": 0.08, "w": 0.22, "h": 0.14 }
+      "box": { "x": 120, "y": 80, "w": 260, "h": 160 }
     }
   ]
 }
 
-Metin yoksa {"bubbles": []} döndür.`;
+Metin yoksa {"bubbles": []}`;
 
     const models = getModelChain();
     const failures: string[] = [];
@@ -202,7 +201,15 @@ Metin yoksa {"bubbles": []} döndür.`;
           prompt,
           mimeType,
           base64Data,
+          imageWidth,
+          imageHeight,
         });
+
+        if (bubbles.length === 0) {
+          // Empty can be valid (no text), return success
+          return NextResponse.json({ bubbles, model: modelName });
+        }
+
         return NextResponse.json({ bubbles, model: modelName });
       } catch (error) {
         const message = errorMessage(error);

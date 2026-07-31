@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import { UploadDropzone } from "@/components/UploadDropzone";
 import { getProject, saveProject } from "@/lib/db";
 import { fileToPages } from "@/lib/pdf";
-import { translatePageImage } from "@/lib/translateClient";
+import { reapplyBubblesToImage, translatePageImage } from "@/lib/translateClient";
 import { LANGUAGES, type ComicPage, type ComicProject } from "@/lib/types";
 
 function languageLabel(code: string) {
@@ -160,6 +160,32 @@ export default function ProjectDetailPage() {
     a.click();
   }
 
+  async function reapplyOverlay() {
+    if (!project || !selectedPage || selectedPage.bubbles.length === 0) return;
+    setBusy(true);
+    setError(null);
+    setViewMode("translated");
+    try {
+      const translatedImageDataUrl = await reapplyBubblesToImage(
+        selectedPage.imageDataUrl,
+        selectedPage.bubbles,
+      );
+      const latest = (await getProject(params.id)) ?? project;
+      await persist({
+        ...latest,
+        pages: latest.pages.map((p) =>
+          p.id === selectedPage.id
+            ? { ...p, translatedImageDataUrl, status: "done", error: undefined }
+            : p,
+        ),
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Görsele yazılamadı");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (project === undefined) {
     return <div className="panel p-8 text-center text-muted">Proje yükleniyor…</div>;
   }
@@ -268,8 +294,33 @@ export default function ProjectDetailPage() {
               <button type="button" className="btn btn-ghost" onClick={downloadTranslated}>
                 İndir
               </button>
+              {selectedPage.bubbles.length > 0 && (
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  disabled={busy}
+                  onClick={() => void reapplyOverlay()}
+                >
+                  Görsele uygula
+                </button>
+              )}
             </div>
           )}
+
+          {selectedPage &&
+            selectedPage.bubbles.length > 0 &&
+            !selectedPage.translatedImageDataUrl && (
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  className="btn btn-accent"
+                  disabled={busy}
+                  onClick={() => void reapplyOverlay()}
+                >
+                  Çeviriyi görsele uygula
+                </button>
+              </div>
+            )}
 
           {displaySrc ? (
             // eslint-disable-next-line @next/next/no-img-element
