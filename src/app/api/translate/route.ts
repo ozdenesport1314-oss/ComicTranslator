@@ -4,6 +4,9 @@ import { NextResponse } from "next/server";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
+const DEFAULT_PRIMARY_MODEL = "gemini-2.5-flash-lite";
+const DEFAULT_FALLBACK_MODEL = "gemini-3.1-flash-lite";
+
 type TranslateBody = {
   imageBase64: string;
   mimeType: string;
@@ -85,6 +88,51 @@ function parseBubbles(raw: string): BubbleResult[] {
     .sort((a, b) => a.readingOrder - b.readingOrder);
 }
 
+function getModelChain(): string[] {
+  const primary = process.env.GEMINI_MODEL?.trim() || DEFAULT_PRIMARY_MODEL;
+  const fallback =
+    process.env.GEMINI_MODEL_FALLBACK?.trim() || DEFAULT_FALLBACK_MODEL;
+
+  if (primary === fallback) return [primary];
+  return [primary, fallback];
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return "Çeviri sırasında beklenmeyen hata";
+}
+
+async function generateWithModel(params: {
+  apiKey: string;
+  modelName: string;
+  prompt: string;
+  mimeType: string;
+  base64Data: string;
+}) {
+  const genAI = new GoogleGenerativeAI(params.apiKey);
+  const model = genAI.getGenerativeModel({
+    model: params.modelName,
+    generationConfig: {
+      temperature: 0.2,
+      responseMimeType: "application/json",
+    },
+  });
+
+  const result = await model.generateContent([
+    { text: params.prompt },
+    {
+      inlineData: {
+        mimeType: params.mimeType.startsWith("image/")
+          ? params.mimeType
+          : "image/jpeg",
+        data: params.base64Data,
+      },
+    },
+  ]);
+
+  return parseBubbles(result.response.text());
+}
+
 export async function POST(request: Request) {
   try {
     const apiKey = process.env.GEMINI_API_KEY;
@@ -108,15 +156,6 @@ export async function POST(request: Request) {
     const base64Data = imageBase64.includes(",")
       ? imageBase64.split(",")[1]
       : imageBase64;
-
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({
-      model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
-      generationConfig: {
-        temperature: 0.2,
-        responseMimeType: "application/json",
-      },
-    });
 
     const sourceHint =
       sourceLanguage && sourceLanguage !== "auto"
@@ -151,24 +190,40 @@ Yanıtı SADECE şu JSON şemasında ver:
 
 Metin yoksa {"bubbles": []} döndür.`;
 
-    const result = await model.generateContent([
-      { text: prompt },
-      {
-        inlineData: {
-          mimeType: mimeType.startsWith("image/") ? mimeType : "image/jpeg",
-          data: base64Data,
-        },
-      },
-    ]);
+    const models = getModelChain();
+    const failures: string[] = [];
 
-    const text = result.response.text();
-    const bubbles = parseBubbles(text);
+    for (let i = 0; i < models.length; i += 1) {
+      const modelName = models[i];
+      try {
+        const bubbles = await generateWithModel({
+          apiKey,
+          modelName,
+          prompt,
+          mimeType,
+          base64Data,
+        });
+        return NextResponse.json({ bubbles, model: modelName });
+      } catch (error) {
+        const message = errorMessage(error);
+        failures.push(`${modelName}: ${message}`);
+        console.error(`translate failed with ${modelName}`, error);
 
-    return NextResponse.json({ bubbles });
+        const hasNext = i < models.length - 1;
+        if (!hasNext) {
+          return NextResponse.json(
+            {
+              error: `Tüm modeller başarısız oldu. ${failures.join(" | ")}`,
+            },
+            { status: 500 },
+          );
+        }
+      }
+    }
+
+    return NextResponse.json({ error: "Çeviri modeli seçilemedi" }, { status: 500 });
   } catch (error) {
     console.error("translate error", error);
-    const message =
-      error instanceof Error ? error.message : "Çeviri sırasında beklenmeyen hata";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: errorMessage(error) }, { status: 500 });
   }
 }
