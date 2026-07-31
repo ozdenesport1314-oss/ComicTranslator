@@ -1,4 +1,4 @@
-import { expandBox } from "./boxes";
+import { insetBox } from "./boxes";
 import type { BubbleTranslation } from "./types";
 
 function loadImage(src: string): Promise<HTMLImageElement> {
@@ -10,26 +10,73 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
-function fillBubbleArea(
+/**
+ * Erase only dark ink (text) inside the region.
+ * Keeps light bubble fill and avoids painting a solid white rectangle over the art/border.
+ */
+function eraseTextInk(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
   w: number,
   h: number,
 ) {
-  const radius = Math.min(w, h) * 0.16;
-  ctx.save();
-  ctx.fillStyle = "#ffffff";
-  ctx.beginPath();
-  if (typeof ctx.roundRect === "function") {
-    ctx.roundRect(x, y, w, h, radius);
-  } else {
-    ctx.rect(x, y, w, h);
+  const ix = Math.max(0, Math.floor(x));
+  const iy = Math.max(0, Math.floor(y));
+  const iw = Math.max(1, Math.floor(w));
+  const ih = Math.max(1, Math.floor(h));
+  if (iw < 2 || ih < 2) return;
+
+  const imageData = ctx.getImageData(ix, iy, iw, ih);
+  const data = imageData.data;
+  const luminances: number[] = [];
+
+  for (let i = 0; i < data.length; i += 4) {
+    luminances.push(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
   }
-  ctx.fill();
-  // Second pass: solid rect inset to guarantee original ink is covered
-  ctx.fillRect(x + w * 0.04, y + h * 0.04, w * 0.92, h * 0.92);
-  ctx.restore();
+
+  // Background ≈ bright end of the region (speech bubbles are usually white/cream)
+  const sorted = [...luminances].sort((a, b) => a - b);
+  const brightStart = Math.floor(sorted.length * 0.7);
+  let bgSum = 0;
+  let bgCount = 0;
+  for (let i = brightStart; i < sorted.length; i += 1) {
+    bgSum += sorted[i];
+    bgCount += 1;
+  }
+  const bg = bgCount ? bgSum / bgCount : 245;
+  const inkThreshold = Math.min(210, bg - 28);
+
+  const edgeX = Math.max(1, Math.floor(iw * 0.08));
+  const edgeY = Math.max(1, Math.floor(ih * 0.08));
+
+  for (let row = 0; row < ih; row += 1) {
+    for (let col = 0; col < iw; col += 1) {
+      const idx = (row * iw + col) * 4;
+      const lum = luminances[row * iw + col];
+      const nearEdge =
+        col < edgeX || col >= iw - edgeX || row < edgeY || row >= ih - edgeY;
+
+      // Near edges: only erase medium-dark text, keep very dark outline strokes
+      if (nearEdge) {
+        if (lum < inkThreshold && lum > 40) {
+          data[idx] = 255;
+          data[idx + 1] = 255;
+          data[idx + 2] = 255;
+        }
+        continue;
+      }
+
+      // Interior: erase ink, keep paper
+      if (lum < inkThreshold) {
+        data[idx] = 255;
+        data[idx + 1] = 255;
+        data[idx + 2] = 255;
+      }
+    }
+  }
+
+  ctx.putImageData(imageData, ix, iy);
 }
 
 function wrapText(
@@ -63,6 +110,76 @@ function wrapText(
   return lines;
 }
 
+function textFits(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+  maxHeight: number,
+  fontSize: number,
+): { ok: boolean; lines: string[] } {
+  ctx.font = `700 ${fontSize}px Arial, "Helvetica Neue", sans-serif`;
+  const lines = wrapText(ctx, text, maxWidth);
+  const lineHeight = fontSize * 1.12;
+  const totalHeight = lines.length * lineHeight;
+  const widest = Math.max(...lines.map((line) => ctx.measureText(line).width), 0);
+  return {
+    ok: totalHeight <= maxHeight && widest <= maxWidth,
+    lines,
+  };
+}
+
+/** Condense translation so it can fit the bubble without changing overall meaning too much. */
+function condenseToFit(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+  maxHeight: number,
+  minFont: number,
+): string {
+  let candidate = text
+    .replace(/\s+/g, " ")
+    .replace(/\s*\.\.\.\s*/g, "…")
+    .trim();
+
+  if (textFits(ctx, candidate, maxWidth, maxHeight, minFont).ok) {
+    return candidate;
+  }
+
+  // Drop soft filler words common in Turkish expansions
+  candidate = candidate
+    .replace(
+      /\b(gerçekten|aslında|açıkçası|şöyle ki|yani|işte|biraz|oldukça|kesinlikle)\b/gi,
+      "",
+    )
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([,.…!?])/g, "$1")
+    .trim();
+
+  if (textFits(ctx, candidate, maxWidth, maxHeight, minFont).ok) {
+    return candidate;
+  }
+
+  // Keep as many leading words as fit
+  const words = candidate.split(/\s+/).filter(Boolean);
+  let low = 1;
+  let high = words.length;
+  let best = words[0] ?? candidate;
+
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const slice = words.slice(0, mid).join(" ");
+    const trial = mid < words.length ? `${slice}…` : slice;
+    if (textFits(ctx, trial, maxWidth, maxHeight, minFont).ok) {
+      best = trial;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  return best;
+}
+
 function fitAndDrawText(
   ctx: CanvasRenderingContext2D,
   text: string,
@@ -71,34 +188,33 @@ function fitAndDrawText(
   w: number,
   h: number,
 ) {
-  const padX = Math.max(3, w * 0.08);
-  const padY = Math.max(3, h * 0.08);
+  const padX = Math.max(2, w * 0.1);
+  const padY = Math.max(2, h * 0.1);
   const maxWidth = Math.max(8, w - padX * 2);
   const maxHeight = Math.max(8, h - padY * 2);
+  const minFont = Math.max(9, Math.min(14, h * 0.14));
+  const maxFont = Math.max(minFont + 1, Math.min(64, h * 0.42));
 
-  let low = 10;
-  let high = Math.max(12, Math.min(84, h * 0.5));
-  let bestSize = low;
-  let bestLines: string[] = [text];
+  const fittedText = condenseToFit(ctx, text, maxWidth, maxHeight, minFont);
+
+  let low = minFont;
+  let high = maxFont;
+  let bestSize = minFont;
+  let bestLines = wrapText(ctx, fittedText, maxWidth);
 
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
-    ctx.font = `800 ${mid}px Arial, "Helvetica Neue", sans-serif`;
-    const lines = wrapText(ctx, text, maxWidth);
-    const lineHeight = mid * 1.12;
-    const totalHeight = lines.length * lineHeight;
-    const widest = Math.max(...lines.map((line) => ctx.measureText(line).width), 0);
-
-    if (totalHeight <= maxHeight && widest <= maxWidth) {
+    const result = textFits(ctx, fittedText, maxWidth, maxHeight, mid);
+    if (result.ok) {
       bestSize = mid;
-      bestLines = lines;
+      bestLines = result.lines;
       low = mid + 1;
     } else {
       high = mid - 1;
     }
   }
 
-  ctx.font = `800 ${bestSize}px Arial, "Helvetica Neue", sans-serif`;
+  ctx.font = `700 ${bestSize}px Arial, "Helvetica Neue", sans-serif`;
   ctx.fillStyle = "#111111";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
@@ -127,25 +243,27 @@ export async function renderTranslatedPage(
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
-  const ctx = canvas.getContext("2d");
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) throw new Error("Canvas desteklenmiyor");
 
   ctx.drawImage(img, 0, 0, width, height);
 
+  // Keep reading order stable: sort, then paint
+  const ordered = [...bubbles].sort((a, b) => a.readingOrder - b.readingOrder);
+
   let painted = 0;
-  for (const bubble of bubbles) {
+  for (const bubble of ordered) {
     if (!bubble.translated?.trim() || !bubble.box) continue;
 
-    const box = expandBox(bubble.box, 0.06);
+    // Slight inset: stay inside bubble, protect outline
+    const box = insetBox(bubble.box, 0.06);
     const x = box.x * width;
     const y = box.y * height;
     const w = box.w * width;
     const h = box.h * height;
-
-    // Allow small bubbles; manga SFX can be tiny
     if (w < 2 || h < 2) continue;
 
-    fillBubbleArea(ctx, x, y, w, h);
+    eraseTextInk(ctx, x, y, w, h);
     fitAndDrawText(ctx, bubble.translated, x, y, w, h);
     painted += 1;
   }

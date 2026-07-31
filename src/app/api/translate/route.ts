@@ -159,30 +159,30 @@ export async function POST(request: Request) {
         ? `Görsel boyutu yaklaşık ${imageWidth}x${imageHeight}px.`
         : "";
 
-    const prompt = `Sen bir manga/çizgi roman çevirmenisin. Bu sayfadaki konuşma baloncukları, düşünce baloncukları, ses efektleri (SFX) ve panellerdeki önemli yazıları bul.
+    const prompt = `Sen bir manga/çizgi roman çevirmenisin. Konuşma/düşünce baloncuklarındaki ve önemli panel yazılarındaki metinleri bul.
 
 ${sizeHint}
 ${sourceHint}
 
-Görev:
-1) Her metin için bounding box ver.
-2) box değerlerini 0 ile 1000 arasında TAM SAYI olarak ver (görsele oranla):
-   - x,y = sol-üst köşe (0–1000)
-   - w,h = genişlik ve yükseklik (0–1000)
-   Örnek: görselin sol üst çeyreği ≈ {"x":50,"y":40,"w":300,"h":180}
-3) Kutu metni tam kapsasın; balonun içini kaplasın.
-4) Okuma sırası: manga sağdan sola / yukarıdan aşağı.
-5) Hedef dil: ${targetLanguage}.
-6) Uydurma metin yok. Çeviriyi balona sığacak kadar kısa tut.
+Kritik kurallar:
+1) box SADECE metnin olduğu iç bölgeyi sarsın. Balonun siyah çerçevesini, kuyruğunu ve dışını KAPLAMASIN. Kutuyu balonun içine, yazının etrafına sıkıca koy.
+2) box değerleri 0–1000 arası tam sayı olsun (x,y sol-üst; w,h boyut).
+3) Okuma sırası aynı kalsın (manga: sağdan sola, yukarıdan aşağı). readingOrder buna göre.
+4) Hedef dil: ${targetLanguage}.
+5) Çeviri balona SIĞMALI. Hedef dilde uzayacaksa anlamı kaybetmeden KISALT / yoğunlaştır.
+   - Orijinalden belirgin şekilde uzun yazma
+   - Gereksiz doldurma yok
+   - Ünlem/ton korunsun
+6) Uydurma metin yok. Balon çerçevesini “düzeltme” veya yeniden çizme.
 
 SADECE JSON:
 {
   "bubbles": [
     {
       "original": "orijinal metin",
-      "translated": "çevrilmiş metin",
+      "translated": "kısa ve balona sığan çeviri",
       "readingOrder": 1,
-      "box": { "x": 120, "y": 80, "w": 260, "h": 160 }
+      "box": { "x": 120, "y": 80, "w": 220, "h": 140 }
     }
   ]
 }

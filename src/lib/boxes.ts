@@ -134,3 +134,17 @@ export function expandBox(box: BubbleBox, padding = 0.04): BubbleBox {
   const h = Math.min(1 - y, box.h + py * 2);
   return { x, y, w, h };
 }
+
+/** Shrink box inward so we stay inside the bubble and away from its outline. */
+export function insetBox(box: BubbleBox, padding = 0.08): BubbleBox {
+  const px = Math.min(box.w * padding, box.w * 0.35);
+  const py = Math.min(box.h * padding, box.h * 0.35);
+  const w = Math.max(0.004, box.w - px * 2);
+  const h = Math.max(0.004, box.h - py * 2);
+  return {
+    x: clamp01(box.x + px),
+    y: clamp01(box.y + py),
+    w,
+    h,
+  };
+}
