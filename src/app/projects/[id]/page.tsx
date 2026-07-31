@@ -25,6 +25,7 @@ export default function ProjectDetailPage() {
   const params = useParams<{ id: string }>();
   const [project, setProject] = useState<ComicProject | null | undefined>(undefined);
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<"translated" | "original">("translated");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -41,6 +42,18 @@ export default function ProjectDetailPage() {
     [project, selectedPageId],
   );
 
+  const displaySrc = useMemo(() => {
+    if (!selectedPage) return null;
+    if (
+      viewMode === "translated" &&
+      selectedPage.translatedImageDataUrl &&
+      selectedPage.status === "done"
+    ) {
+      return selectedPage.translatedImageDataUrl;
+    }
+    return selectedPage.imageDataUrl;
+  }, [selectedPage, viewMode]);
+
   async function persist(next: ComicProject) {
     setProject(next);
     await saveProject(next);
@@ -50,6 +63,7 @@ export default function ProjectDetailPage() {
     const current = (await getProject(params.id)) ?? project;
     if (!current) return;
     setError(null);
+    setViewMode("translated");
 
     const updating: ComicProject = {
       ...current,
@@ -65,7 +79,7 @@ export default function ProjectDetailPage() {
       const page = updating.pages.find((p) => p.id === pageId);
       if (!page) return;
 
-      const bubbles = await translatePageImage({
+      const { bubbles, translatedImageDataUrl } = await translatePageImage({
         imageDataUrl: page.imageDataUrl,
         mimeType: page.mimeType,
         targetLanguage: languageLabel(updating.targetLanguage),
@@ -76,7 +90,15 @@ export default function ProjectDetailPage() {
       const done: ComicProject = {
         ...latest,
         pages: latest.pages.map((p) =>
-          p.id === pageId ? { ...p, bubbles, status: "done", error: undefined } : p,
+          p.id === pageId
+            ? {
+                ...p,
+                bubbles,
+                translatedImageDataUrl,
+                status: "done",
+                error: undefined,
+              }
+            : p,
         ),
       };
       await persist(done);
@@ -128,6 +150,14 @@ export default function ProjectDetailPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function downloadTranslated() {
+    if (!selectedPage?.translatedImageDataUrl) return;
+    const a = document.createElement("a");
+    a.href = selectedPage.translatedImageDataUrl;
+    a.download = `${selectedPage.name.replace(/\.[^.]+$/, "")}-translated.jpg`;
+    a.click();
   }
 
   if (project === undefined) {
@@ -206,7 +236,7 @@ export default function ProjectDetailPage() {
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
-                src={page.imageDataUrl}
+                src={page.translatedImageDataUrl || page.imageDataUrl}
                 alt={page.name}
                 className="mb-2 aspect-[3/4] w-full rounded-lg object-cover"
               />
@@ -219,11 +249,33 @@ export default function ProjectDetailPage() {
         </aside>
 
         <section className="panel rise-in-delay overflow-hidden p-3 md:p-4">
-          {selectedPage ? (
+          {selectedPage && selectedPage.translatedImageDataUrl && (
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className={`btn ${viewMode === "translated" ? "btn-primary" : "btn-ghost"}`}
+                onClick={() => setViewMode("translated")}
+              >
+                Çevrilmiş
+              </button>
+              <button
+                type="button"
+                className={`btn ${viewMode === "original" ? "btn-primary" : "btn-ghost"}`}
+                onClick={() => setViewMode("original")}
+              >
+                Orijinal
+              </button>
+              <button type="button" className="btn btn-ghost" onClick={downloadTranslated}>
+                İndir
+              </button>
+            </div>
+          )}
+
+          {displaySrc ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={selectedPage.imageDataUrl}
-              alt={selectedPage.name}
+              src={displaySrc}
+              alt={selectedPage?.name ?? "Sayfa"}
               className="mx-auto max-h-[75vh] w-auto rounded-lg object-contain"
             />
           ) : (
@@ -236,10 +288,10 @@ export default function ProjectDetailPage() {
         <section className="panel space-y-4 p-4">
           <div>
             <h2 className="font-[family-name:var(--font-display)] text-lg font-extrabold">
-              Baloncuk çevirileri
+              Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              Gemini görseldeki metinleri okuyup hedef dile çevirir.
+              Gemini baloncuk konumunu bulur; çeviri doğrudan görsele yazılır.
             </p>
           </div>
 
@@ -247,7 +299,7 @@ export default function ProjectDetailPage() {
 
           {selectedPage?.status === "translating" && (
             <p className="rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-800">
-              Çevriliyor… bu biraz sürebilir.
+              Çevriliyor ve baloncuklar güncelleniyor…
             </p>
           )}
 

@@ -1,8 +1,17 @@
+export type BubbleBox = {
+  /** Normalized 0–1 relative to image width/height */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
+
 export type BubbleTranslation = {
   id: string;
   original: string;
   translated: string;
   readingOrder: number;
+  box: BubbleBox;
 };
 
 export type ComicPage = {
@@ -10,6 +19,7 @@ export type ComicPage = {
   name: string;
   imageDataUrl: string;
   mimeType: string;
+  translatedImageDataUrl?: string;
   bubbles: BubbleTranslation[];
   status: "pending" | "translating" | "done" | "error";
   error?: string;

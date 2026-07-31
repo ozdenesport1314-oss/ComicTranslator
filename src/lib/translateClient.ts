@@ -1,13 +1,14 @@
 import { nanoid } from "nanoid";
-import type { BubbleTranslation } from "./types";
 import { compressDataUrl } from "./pdf";
+import { renderTranslatedPage } from "./renderTranslated";
+import type { BubbleTranslation } from "./types";
 
 export async function translatePageImage(params: {
   imageDataUrl: string;
   mimeType: string;
   targetLanguage: string;
   sourceLanguage: string;
-}): Promise<BubbleTranslation[]> {
+}): Promise<{ bubbles: BubbleTranslation[]; translatedImageDataUrl: string }> {
   const compressed = await compressDataUrl(params.imageDataUrl);
 
   const response = await fetch("/api/translate", {
@@ -22,7 +23,12 @@ export async function translatePageImage(params: {
   });
 
   const data = (await response.json()) as {
-    bubbles?: Array<{ original: string; translated: string; readingOrder: number }>;
+    bubbles?: Array<{
+      original: string;
+      translated: string;
+      readingOrder: number;
+      box: { x: number; y: number; w: number; h: number };
+    }>;
     error?: string;
   };
 
@@ -30,10 +36,16 @@ export async function translatePageImage(params: {
     throw new Error(data.error || "Çeviri isteği başarısız");
   }
 
-  return (data.bubbles ?? []).map((bubble) => ({
+  const bubbles: BubbleTranslation[] = (data.bubbles ?? []).map((bubble) => ({
     id: nanoid(),
     original: bubble.original,
     translated: bubble.translated,
     readingOrder: bubble.readingOrder,
+    box: bubble.box,
   }));
+
+  // Render onto the full-resolution original page, not the compressed API upload
+  const translatedImageDataUrl = await renderTranslatedPage(params.imageDataUrl, bubbles);
+
+  return { bubbles, translatedImageDataUrl };
 }

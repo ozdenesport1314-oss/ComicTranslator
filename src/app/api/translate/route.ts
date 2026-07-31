@@ -15,6 +15,7 @@ type BubbleResult = {
   original: string;
   translated: string;
   readingOrder: number;
+  box: { x: number; y: number; w: number; h: number };
 };
 
 function stripCodeFence(text: string): string {
@@ -23,25 +24,64 @@ function stripCodeFence(text: string): string {
   return fenced ? fenced[1].trim() : trimmed;
 }
 
+function clamp01(n: number) {
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(1, Math.max(0, n));
+}
+
+function normalizeBox(raw: unknown): BubbleResult["box"] | null {
+  if (!raw || typeof raw !== "object") return null;
+  const box = raw as Record<string, unknown>;
+  const x = Number(box.x);
+  const y = Number(box.y);
+  const w = Number(box.w ?? box.width);
+  const h = Number(box.h ?? box.height);
+  if (![x, y, w, h].every((v) => Number.isFinite(v))) return null;
+  if (w <= 0 || h <= 0) return null;
+
+  // Accept either 0–1 normalized or 0–100 percentage
+  const scale = Math.max(x, y, w, h) > 1.5 ? 100 : 1;
+  const nx = clamp01(x / scale);
+  const ny = clamp01(y / scale);
+  const nw = clamp01(w / scale);
+  const nh = clamp01(h / scale);
+  if (nw < 0.01 || nh < 0.01) return null;
+  return {
+    x: nx,
+    y: ny,
+    w: Math.min(nw, 1 - nx),
+    h: Math.min(nh, 1 - ny),
+  };
+}
+
 function parseBubbles(raw: string): BubbleResult[] {
   const cleaned = stripCodeFence(raw);
-  const parsed = JSON.parse(cleaned) as { bubbles?: BubbleResult[] } | BubbleResult[];
+  const parsed = JSON.parse(cleaned) as { bubbles?: unknown[] } | unknown[];
   const bubbles = Array.isArray(parsed) ? parsed : parsed.bubbles;
   if (!Array.isArray(bubbles)) {
     throw new Error("Gemini yanıtı beklenen formatta değil");
   }
 
   return bubbles
-    .filter((b) => b && typeof b.original === "string" && typeof b.translated === "string")
-    .map((b, index) => ({
-      original: b.original.trim(),
-      translated: b.translated.trim(),
-      readingOrder:
-        typeof b.readingOrder === "number" && Number.isFinite(b.readingOrder)
-          ? b.readingOrder
-          : index + 1,
-    }))
-    .filter((b) => b.original.length > 0)
+    .map((item, index) => {
+      if (!item || typeof item !== "object") return null;
+      const b = item as Record<string, unknown>;
+      const original = String(b.original ?? "").trim();
+      const translated = String(b.translated ?? "").trim();
+      if (!original || !translated) return null;
+      const box = normalizeBox(b.box);
+      if (!box) return null;
+      return {
+        original,
+        translated,
+        readingOrder:
+          typeof b.readingOrder === "number" && Number.isFinite(b.readingOrder)
+            ? b.readingOrder
+            : index + 1,
+        box,
+      } satisfies BubbleResult;
+    })
+    .filter((b): b is BubbleResult => b !== null)
     .sort((a, b) => a.readingOrder - b.readingOrder);
 }
 
@@ -83,14 +123,19 @@ export async function POST(request: Request) {
         ? `Kaynak dil: ${sourceLanguage}.`
         : "Kaynak dili otomatik algıla.";
 
-    const prompt = `Sen bir manga/çizgi roman çevirmenisin. Bu sayfadaki konuşma baloncukları, düşünce baloncukları, ses efektleri (SFX) ve panellerdeki önemli yazıları oku.
+    const prompt = `Sen bir manga/çizgi roman çevirmenisin. Bu sayfadaki konuşma baloncukları, düşünce baloncukları, ses efektleri (SFX) ve panellerdeki önemli yazıları bul.
 
 Görev:
-1) Metinleri okuma sırasına göre çıkar (manga için sağdan sola, yukarıdan aşağıya; batı çizgi romanı için soldan sağa).
-2) Her metni hedef dile çevir: ${targetLanguage}.
-3) ${sourceHint}
-4) Karakterlerin konuşma tarzını, ünlemleri ve manga tonunu koru.
-5) Sadece görseldeki gerçek metinleri çevir; uydurma.
+1) Her metin bölgesinin sınır kutusunu (bounding box) ver.
+2) box değerleri NORMALİZE edilmiş olsun: x,y,w,h hepsi 0 ile 1 arasında (görsel genişlik/yüksekliğine oran).
+   - x,y = kutunun sol-üst köşesi
+   - w,h = genişlik ve yükseklik
+   - Kutu metnin tamamını ve biraz boşluğu kapsasın; balon çerçevesini mümkün olduğunca dışarıda bırak.
+3) Metinleri okuma sırasına göre çıkar (manga: sağdan sola / yukarıdan aşağı; batı: soldan sağa).
+4) Her metni hedef dile çevir: ${targetLanguage}.
+5) ${sourceHint}
+6) Karakter tarzını ve manga tonunu koru. Uydurma metin ekleme.
+7) Çeviriyi balona sığacak kadar kısa/doğal tut.
 
 Yanıtı SADECE şu JSON şemasında ver:
 {
@@ -98,7 +143,8 @@ Yanıtı SADECE şu JSON şemasında ver:
     {
       "original": "orijinal metin",
       "translated": "çevrilmiş metin",
-      "readingOrder": 1
+      "readingOrder": 1,
+      "box": { "x": 0.12, "y": 0.08, "w": 0.22, "h": 0.14 }
     }
   ]
 }

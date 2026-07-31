@@ -6,8 +6,9 @@ Manga / çizgi roman sayfalarındaki baloncuk metinlerini **Gemini** ile istedi�
 - PDF veya görsel (PNG/JPG/WEBP) yükle
 - Hedef dili seç
 - Sayfa sayfa veya toplu çevir
+- Çeviriyi baloncukların üzerine yazar (orijinal / çevrilmiş görüntü)
 
-Projeler tarayıcıda (IndexedDB) saklanır. Çeviri için sunucu tarafında Gemini API kullanılır.
+Projeler tarayıcıda (IndexedDB) saklanır. Gemini baloncuk konumunu + çeviriyi üretir; tarayıcı görsele yazar.
 
 ## Kurulum
 
