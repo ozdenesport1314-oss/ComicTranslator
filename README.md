@@ -20,7 +20,7 @@ cp .env.example .env.local
 
 ```env
 GEMINI_API_KEY=your_key_here
-GEMINI_MODEL=gemini-2.0-flash
+GEMINI_MODEL=gemini-2.5-flash
 ```
 
 API key: [Google AI Studio](https://aistudio.google.com/apikey)
@@ -37,7 +37,7 @@ Tarayıcıda: [http://localhost:3000](http://localhost:3000)
 2. [Vercel](https://vercel.com) → **Add New Project** → repo’yu seç
 3. Environment Variables ekle:
    - `GEMINI_API_KEY`
-   - (opsiyonel) `GEMINI_MODEL=gemini-2.0-flash`
+   - (opsiyonel) `GEMINI_MODEL=gemini-2.5-flash`
 4. Deploy
 
 Framework: Next.js (otomatik algılanır).
