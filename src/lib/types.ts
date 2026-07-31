@@ -11,7 +11,10 @@ export type BubbleTranslation = {
   original: string;
   translated: string;
   readingOrder: number;
+  /** Text region inside the bubble */
   box: BubbleBox;
+  /** Full bubble bounds (optional; falls back to expanded text box) */
+  bubbleBox?: BubbleBox;
 };
 
 export type ComicPage = {
@@ -20,6 +23,7 @@ export type ComicPage = {
   imageDataUrl: string;
   mimeType: string;
   translatedImageDataUrl?: string;
+  debugImageDataUrl?: string;
   bubbles: BubbleTranslation[];
   status: "pending" | "translating" | "done" | "error";
   error?: string;

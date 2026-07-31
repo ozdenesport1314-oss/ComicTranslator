@@ -1,5 +1,10 @@
 import { expandBox, insetBox } from "./boxes";
-import type { BubbleTranslation } from "./types";
+import type { BubbleBox, BubbleTranslation } from "./types";
+
+export type RenderOptions = {
+  /** Draw detected zones: bubble=orange, text=cyan, redzone=red */
+  showRedzone?: boolean;
+};
 
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -10,105 +15,113 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
-function lumOf(r: number, g: number, b: number) {
-  return 0.299 * r + 0.587 * g + 0.114 * b;
+function toPx(box: BubbleBox, width: number, height: number) {
+  return {
+    x: box.x * width,
+    y: box.y * height,
+    w: Math.max(1, box.w * width),
+    h: Math.max(1, box.h * height),
+  };
+}
+
+function resolveBubbleBox(bubble: BubbleTranslation): BubbleBox {
+  return bubble.bubbleBox ?? expandBox(bubble.box, 0.2);
+}
+
+/** Redzone = bubble border band (outer part of bubbleBox). Do not wipe here. */
+function buildRedzoneMask(
+  bubblePx: { x: number; y: number; w: number; h: number },
+  width: number,
+  height: number,
+  bandRatio = 0.14,
+): Uint8Array {
+  const mask = new Uint8Array(width * height);
+  const bandX = Math.max(2, Math.floor(bubblePx.w * bandRatio));
+  const bandY = Math.max(2, Math.floor(bubblePx.h * bandRatio));
+
+  const x0 = Math.max(0, Math.floor(bubblePx.x));
+  const y0 = Math.max(0, Math.floor(bubblePx.y));
+  const x1 = Math.min(width, Math.ceil(bubblePx.x + bubblePx.w));
+  const y1 = Math.min(height, Math.ceil(bubblePx.y + bubblePx.h));
+
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = x0; x < x1; x += 1) {
+      const localX = x - bubblePx.x;
+      const localY = y - bubblePx.y;
+      const onRing =
+        localX < bandX ||
+        localX >= bubblePx.w - bandX ||
+        localY < bandY ||
+        localY >= bubblePx.h - bandY;
+      if (onRing) mask[y * width + x] = 1;
+    }
+  }
+  return mask;
 }
 
 /**
- * Completely wipe original text inside the bubble region.
- * Keeps only very-dark strokes on the outer ring (bubble outline).
- * Everything else in the region becomes white — no leftover English.
+ * Mask original text: wipe pixels inside text region / bubble interior,
+ * but never touch redzone (bubble border).
  */
-function wipeBubbleInterior(
+function maskTextInsideBubble(
   ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
+  width: number,
+  height: number,
+  textPx: { x: number; y: number; w: number; h: number },
+  bubblePx: { x: number; y: number; w: number; h: number },
+  redzone: Uint8Array,
 ) {
-  const ix = Math.max(0, Math.floor(x));
-  const iy = Math.max(0, Math.floor(y));
-  const iw = Math.max(1, Math.ceil(w));
-  const ih = Math.max(1, Math.ceil(h));
-  if (iw < 3 || ih < 3) return;
+  // Wipe region = text box expanded a bit, clipped to bubble interior
+  const wipe = {
+    x: Math.max(bubblePx.x, textPx.x - textPx.w * 0.06),
+    y: Math.max(bubblePx.y, textPx.y - textPx.h * 0.06),
+    w: 0,
+    h: 0,
+  };
+  const right = Math.min(bubblePx.x + bubblePx.w, textPx.x + textPx.w * 1.06);
+  const bottom = Math.min(bubblePx.y + bubblePx.h, textPx.y + textPx.h * 1.06);
+  wipe.w = Math.max(1, right - wipe.x);
+  wipe.h = Math.max(1, bottom - wipe.y);
+
+  const ix = Math.max(0, Math.floor(wipe.x));
+  const iy = Math.max(0, Math.floor(wipe.y));
+  const iw = Math.max(1, Math.min(width - ix, Math.ceil(wipe.w)));
+  const ih = Math.max(1, Math.min(height - iy, Math.ceil(wipe.h)));
+  if (iw < 2 || ih < 2) return;
 
   const imageData = ctx.getImageData(ix, iy, iw, ih);
   const { data } = imageData;
-  const count = iw * ih;
-  const lum = new Float32Array(count);
 
-  for (let p = 0; p < count; p += 1) {
-    const i = p * 4;
-    lum[p] = lumOf(data[i], data[i + 1], data[i + 2]);
-  }
+  // Inner core of text box: force white (complete cover of old glyphs)
+  const corePadX = Math.max(1, Math.floor(iw * 0.04));
+  const corePadY = Math.max(1, Math.floor(ih * 0.04));
 
-  // Outer ring where bubble outline may sit — keep only hard black strokes there
-  const ringX = Math.max(2, Math.floor(iw * 0.1));
-  const ringY = Math.max(2, Math.floor(ih * 0.1));
-  const outlineCut = 48;
-
-  // Mark outline candidates: very dark pixels on the ring, connected to the rect border
-  const outline = new Uint8Array(count);
-  const stack: number[] = [];
-
-  const pushIfOutlineSeed = (col: number, row: number) => {
-    if (col < 0 || row < 0 || col >= iw || row >= ih) return;
-    const p = row * iw + col;
-    if (lum[p] <= outlineCut) stack.push(p);
-  };
-
-  for (let col = 0; col < iw; col += 1) {
-    pushIfOutlineSeed(col, 0);
-    pushIfOutlineSeed(col, ih - 1);
-  }
   for (let row = 0; row < ih; row += 1) {
-    pushIfOutlineSeed(0, row);
-    pushIfOutlineSeed(iw - 1, row);
-  }
+    for (let col = 0; col < iw; col += 1) {
+      const gx = ix + col;
+      const gy = iy + row;
+      if (gx < 0 || gy < 0 || gx >= width || gy >= height) continue;
+      if (redzone[gy * width + gx]) continue; // protect bubble border
 
-  while (stack.length) {
-    const p = stack.pop() as number;
-    if (outline[p]) continue;
-    if (lum[p] > outlineCut) continue;
+      const i = (row * iw + col) * 4;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
 
-    const row = Math.floor(p / iw);
-    const col = p - row * iw;
-    const onRing =
-      col < ringX || col >= iw - ringX || row < ringY || row >= ih - ringY;
-    // Only grow outline along the ring / near border so inner text isn't "outline"
-    if (!onRing) continue;
+      const inCore =
+        col >= corePadX &&
+        col < iw - corePadX &&
+        row >= corePadY &&
+        row < ih - corePadY;
 
-    outline[p] = 1;
-    const neighbors = [p - 1, p + 1, p - iw, p + iw, p - iw - 1, p - iw + 1, p + iw - 1, p + iw + 1];
-    for (const n of neighbors) {
-      if (n < 0 || n >= count) continue;
-      const nr = Math.floor(n / iw);
-      const nc = n - nr * iw;
-      if (Math.abs(nr - row) > 1 || Math.abs(nc - col) > 1) continue;
-      if (!outline[n] && lum[n] <= outlineCut) stack.push(n);
-    }
-  }
-
-  // Wipe everything that is not preserved outline
-  for (let p = 0; p < count; p += 1) {
-    if (outline[p]) continue;
-    const i = p * 4;
-    data[i] = 255;
-    data[i + 1] = 255;
-    data[i + 2] = 255;
-    data[i + 3] = 255;
-  }
-
-  // Second pass: kill tiny dark speckles left inside (orphan ink)
-  for (let row = 1; row < ih - 1; row += 1) {
-    for (let col = 1; col < iw - 1; col += 1) {
-      const p = row * iw + col;
-      if (outline[p]) continue;
-      const i = p * 4;
-      // already white from pass 1; re-assert for safety
-      data[i] = 255;
-      data[i + 1] = 255;
-      data[i + 2] = 255;
+      // Core always white; elsewhere wipe ink / mid-gray glyph edges
+      if (inCore || lum < 215) {
+        data[i] = 255;
+        data[i + 1] = 255;
+        data[i + 2] = 255;
+        data[i + 3] = 255;
+      }
     }
   }
 
@@ -129,20 +142,17 @@ function wrapText(
       lines.push("");
       continue;
     }
-
     let current = words[0];
     for (let i = 1; i < words.length; i += 1) {
       const next = `${current} ${words[i]}`;
-      if (ctx.measureText(next).width <= maxWidth) {
-        current = next;
-      } else {
+      if (ctx.measureText(next).width <= maxWidth) current = next;
+      else {
         lines.push(current);
         current = words[i];
       }
     }
     lines.push(current);
   }
-
   return lines;
 }
 
@@ -152,12 +162,12 @@ function textFits(
   maxWidth: number,
   maxHeight: number,
   fontSize: number,
-): { ok: boolean; lines: string[] } {
+) {
   ctx.font = `700 ${fontSize}px Arial, "Helvetica Neue", sans-serif`;
   const lines = wrapText(ctx, text, maxWidth);
   const lineHeight = fontSize * 1.12;
   const totalHeight = lines.length * lineHeight;
-  const widest = Math.max(...lines.map((line) => ctx.measureText(line).width), 0);
+  const widest = Math.max(...lines.map((l) => ctx.measureText(l).width), 0);
   return {
     ok: totalHeight <= maxHeight && widest <= maxWidth,
     lines,
@@ -171,11 +181,7 @@ function condenseToFit(
   maxHeight: number,
   minFont: number,
 ): string {
-  let candidate = text
-    .replace(/\s+/g, " ")
-    .replace(/\s*\.\.\.\s*/g, "…")
-    .trim();
-
+  let candidate = text.replace(/\s+/g, " ").replace(/\s*\.\.\.\s*/g, "…").trim();
   if (textFits(ctx, candidate, maxWidth, maxHeight, minFont).ok) return candidate;
 
   candidate = candidate
@@ -186,14 +192,12 @@ function condenseToFit(
     .replace(/\s{2,}/g, " ")
     .replace(/\s+([,.…!?])/g, "$1")
     .trim();
-
   if (textFits(ctx, candidate, maxWidth, maxHeight, minFont).ok) return candidate;
 
   const words = candidate.split(/\s+/).filter(Boolean);
   let low = 1;
   let high = words.length;
   let best = words[0] ?? candidate;
-
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
     const slice = words.slice(0, mid).join(" ");
@@ -201,15 +205,12 @@ function condenseToFit(
     if (textFits(ctx, trial, maxWidth, maxHeight, minFont).ok) {
       best = trial;
       low = mid + 1;
-    } else {
-      high = mid - 1;
-    }
+    } else high = mid - 1;
   }
-
   return best;
 }
 
-function fitAndDrawText(
+function placeTranslation(
   ctx: CanvasRenderingContext2D,
   text: string,
   x: number,
@@ -217,30 +218,27 @@ function fitAndDrawText(
   w: number,
   h: number,
 ) {
-  const padX = Math.max(3, w * 0.12);
-  const padY = Math.max(3, h * 0.12);
+  const padX = Math.max(3, w * 0.1);
+  const padY = Math.max(3, h * 0.1);
   const maxWidth = Math.max(8, w - padX * 2);
   const maxHeight = Math.max(8, h - padY * 2);
   const minFont = Math.max(10, Math.min(16, h * 0.16));
   const maxFont = Math.max(minFont + 1, Math.min(68, h * 0.42));
-
-  const fittedText = condenseToFit(ctx, text, maxWidth, maxHeight, minFont);
+  const fitted = condenseToFit(ctx, text, maxWidth, maxHeight, minFont);
 
   let low = minFont;
   let high = maxFont;
   let bestSize = minFont;
-  let bestLines = wrapText(ctx, fittedText, maxWidth);
+  let bestLines = wrapText(ctx, fitted, maxWidth);
 
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
-    const result = textFits(ctx, fittedText, maxWidth, maxHeight, mid);
+    const result = textFits(ctx, fitted, maxWidth, maxHeight, mid);
     if (result.ok) {
       bestSize = mid;
       bestLines = result.lines;
       low = mid + 1;
-    } else {
-      high = mid - 1;
-    }
+    } else high = mid - 1;
   }
 
   ctx.font = `700 ${bestSize}px Arial, "Helvetica Neue", sans-serif`;
@@ -251,57 +249,101 @@ function fitAndDrawText(
   const lineHeight = bestSize * 1.12;
   const totalHeight = bestLines.length * lineHeight;
   let cursorY = y + h / 2 - totalHeight / 2 + lineHeight / 2;
-
   for (const line of bestLines) {
     ctx.fillText(line, x + w / 2, cursorY, maxWidth);
     cursorY += lineHeight;
   }
 }
 
+function drawDebugZones(
+  ctx: CanvasRenderingContext2D,
+  bubblePx: { x: number; y: number; w: number; h: number },
+  textPx: { x: number; y: number; w: number; h: number },
+  redzone: Uint8Array,
+  width: number,
+  height: number,
+) {
+  // Redzone fill
+  const overlay = ctx.getImageData(0, 0, width, height);
+  for (let i = 0; i < redzone.length; i += 1) {
+    if (!redzone[i]) continue;
+    const px = i * 4;
+    overlay.data[px] = Math.min(255, overlay.data[px] * 0.45 + 220 * 0.55);
+    overlay.data[px + 1] = overlay.data[px + 1] * 0.45;
+    overlay.data[px + 2] = overlay.data[px + 2] * 0.45;
+  }
+  ctx.putImageData(overlay, 0, 0);
+
+  ctx.save();
+  ctx.lineWidth = Math.max(2, Math.min(width, height) * 0.0025);
+
+  // Bubble boundary
+  ctx.strokeStyle = "#ff7a00";
+  ctx.strokeRect(bubblePx.x, bubblePx.y, bubblePx.w, bubblePx.h);
+
+  // Text box
+  ctx.strokeStyle = "#00d4ff";
+  ctx.strokeRect(textPx.x, textPx.y, textPx.w, textPx.h);
+
+  // Redzone outline = bubble edge
+  ctx.strokeStyle = "#ff0033";
+  ctx.setLineDash([6, 4]);
+  ctx.strokeRect(bubblePx.x, bubblePx.y, bubblePx.w, bubblePx.h);
+  ctx.restore();
+}
+
+/**
+ * Pipeline:
+ * 1) Zemin oluştur (working layer)
+ * 2) Balon / yazı / sınır algısı (gelen box'lar)
+ * 3) Sınıra redzone çiz (koruma bandı)
+ * 4) Yazıyı maskele
+ * 5) Çeviriyi ekle
+ */
 export async function renderTranslatedPage(
   imageDataUrl: string,
   bubbles: BubbleTranslation[],
+  options: RenderOptions = {},
 ): Promise<string> {
   const img = await loadImage(imageDataUrl);
   const width = img.naturalWidth || img.width;
   const height = img.naturalHeight || img.height;
-  if (!width || !height) {
-    throw new Error("Görsel boyutları okunamadı");
-  }
+  if (!width || !height) throw new Error("Görsel boyutları okunamadı");
 
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  // 1) Zemin katmanı
+  const zemin = document.createElement("canvas");
+  zemin.width = width;
+  zemin.height = height;
+  const ctx = zemin.getContext("2d", { willReadFrequently: true });
   if (!ctx) throw new Error("Canvas desteklenmiyor");
-
   ctx.drawImage(img, 0, 0, width, height);
 
   const ordered = [...bubbles].sort((a, b) => a.readingOrder - b.readingOrder);
-
   let painted = 0;
+
   for (const bubble of ordered) {
     if (!bubble.translated?.trim() || !bubble.box) continue;
 
-    // Wipe a bit larger than detected text so no English peeks out
-    const wipe = expandBox(bubble.box, 0.14);
-    // Draw a bit inset so letters stay inside the cleaned bubble
-    const draw = insetBox(bubble.box, 0.04);
+    // 2) Balon + yazı algısı
+    const bubbleBox = resolveBubbleBox(bubble);
+    const textBox = bubble.box;
+    const bubblePx = toPx(bubbleBox, width, height);
+    const textPx = toPx(textBox, width, height);
 
-    const wx = wipe.x * width;
-    const wy = wipe.y * height;
-    const ww = wipe.w * width;
-    const wh = wipe.h * height;
+    // 3) Sınıra redzone
+    const redzone = buildRedzoneMask(bubblePx, width, height, 0.12);
 
-    const dx = draw.x * width;
-    const dy = draw.y * height;
-    const dw = draw.w * width;
-    const dh = draw.h * height;
+    if (options.showRedzone) {
+      drawDebugZones(ctx, bubblePx, textPx, redzone, width, height);
+    }
 
-    if (ww < 2 || wh < 2 || dw < 2 || dh < 2) continue;
+    // 4) Yazıyı maskele (redzone'a dokunma)
+    maskTextInsideBubble(ctx, width, height, textPx, bubblePx, redzone);
 
-    wipeBubbleInterior(ctx, wx, wy, ww, wh);
-    fitAndDrawText(ctx, bubble.translated, dx, dy, dw, dh);
+    // 5) Çeviriyi ekle
+    const draw = insetBox(textBox, 0.03);
+    const drawPx = toPx(draw, width, height);
+    placeTranslation(ctx, bubble.translated, drawPx.x, drawPx.y, drawPx.w, drawPx.h);
     painted += 1;
   }
 
@@ -311,5 +353,5 @@ export async function renderTranslatedPage(
     );
   }
 
-  return canvas.toDataURL("image/jpeg", 0.92);
+  return zemin.toDataURL("image/jpeg", 0.92);
 }

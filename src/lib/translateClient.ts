@@ -1,7 +1,7 @@
 import { nanoid } from "nanoid";
 import { normalizeBubbleBox } from "./boxes";
 import { compressDataUrl } from "./pdf";
-import { renderTranslatedPage } from "./renderTranslated";
+import { renderTranslatedPage, type RenderOptions } from "./renderTranslated";
 import type { BubbleTranslation } from "./types";
 
 function loadImageSize(src: string): Promise<{ width: number; height: number }> {
@@ -22,7 +22,11 @@ export async function translatePageImage(params: {
   mimeType: string;
   targetLanguage: string;
   sourceLanguage: string;
-}): Promise<{ bubbles: BubbleTranslation[]; translatedImageDataUrl: string }> {
+}): Promise<{
+  bubbles: BubbleTranslation[];
+  translatedImageDataUrl: string;
+  debugImageDataUrl: string;
+}> {
   const compressed = await compressDataUrl(params.imageDataUrl);
   const size = await loadImageSize(compressed.dataUrl);
 
@@ -45,6 +49,8 @@ export async function translatePageImage(params: {
       translated: string;
       readingOrder: number;
       box?: unknown;
+      textBox?: unknown;
+      bubbleBox?: unknown;
     }>;
     error?: string;
   };
@@ -53,19 +59,24 @@ export async function translatePageImage(params: {
     throw new Error(data.error || "Çeviri isteği başarısız");
   }
 
-  const bubbles: BubbleTranslation[] = (data.bubbles ?? [])
-    .map((bubble) => {
-      const box = normalizeBubbleBox(bubble.box, size.width, size.height);
-      if (!box) return null;
-      return {
-        id: nanoid(),
-        original: bubble.original,
-        translated: bubble.translated,
-        readingOrder: bubble.readingOrder,
-        box,
-      } satisfies BubbleTranslation;
-    })
-    .filter((b): b is BubbleTranslation => b !== null);
+  const bubbles: BubbleTranslation[] = [];
+  for (const bubble of data.bubbles ?? []) {
+    const box = normalizeBubbleBox(
+      bubble.textBox ?? bubble.box,
+      size.width,
+      size.height,
+    );
+    if (!box) continue;
+    bubbles.push({
+      id: nanoid(),
+      original: bubble.original,
+      translated: bubble.translated,
+      readingOrder: bubble.readingOrder,
+      box,
+      bubbleBox:
+        normalizeBubbleBox(bubble.bubbleBox, size.width, size.height) ?? undefined,
+    });
+  }
 
   if ((data.bubbles?.length ?? 0) > 0 && bubbles.length === 0) {
     throw new Error(
@@ -73,18 +84,18 @@ export async function translatePageImage(params: {
     );
   }
 
-  const translatedImageDataUrl = await renderTranslatedPage(
-    params.imageDataUrl,
-    bubbles,
-  );
+  const [translatedImageDataUrl, debugImageDataUrl] = await Promise.all([
+    renderTranslatedPage(params.imageDataUrl, bubbles, { showRedzone: false }),
+    renderTranslatedPage(params.imageDataUrl, bubbles, { showRedzone: true }),
+  ]);
 
-  return { bubbles, translatedImageDataUrl };
+  return { bubbles, translatedImageDataUrl, debugImageDataUrl };
 }
 
-/** Re-apply existing bubble translations onto the original image */
 export async function reapplyBubblesToImage(
   imageDataUrl: string,
   bubbles: BubbleTranslation[],
+  options: RenderOptions = {},
 ): Promise<string> {
-  return renderTranslatedPage(imageDataUrl, bubbles);
+  return renderTranslatedPage(imageDataUrl, bubbles, options);
 }

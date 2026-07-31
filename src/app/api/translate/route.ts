@@ -1,6 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
-import { normalizeBubbleBox } from "@/lib/boxes";
+import { expandBox, normalizeBubbleBox } from "@/lib/boxes";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -22,6 +22,7 @@ type BubbleResult = {
   translated: string;
   readingOrder: number;
   box: { x: number; y: number; w: number; h: number };
+  bubbleBox: { x: number; y: number; w: number; h: number };
 };
 
 function stripCodeFence(text: string): string {
@@ -50,12 +51,21 @@ function parseBubbles(
       const translated = String(b.translated ?? b.translation ?? b.target ?? "").trim();
       if (!original || !translated) return null;
 
-      // Prefer nested box; also accept top-level coordinates
-      const box =
-        normalizeBubbleBox(b.box ?? b.bbox ?? b.boundingBox, imageWidth, imageHeight) ??
-        normalizeBubbleBox(b, imageWidth, imageHeight);
+      const textBox =
+        normalizeBubbleBox(
+          b.textBox ?? b.box ?? b.bbox ?? b.boundingBox,
+          imageWidth,
+          imageHeight,
+        ) ?? normalizeBubbleBox(b, imageWidth, imageHeight);
 
-      if (!box) return null;
+      if (!textBox) return null;
+
+      const bubbleBox =
+        normalizeBubbleBox(
+          b.bubbleBox ?? b.bubble ?? b.balloon ?? b.bubbleBounds,
+          imageWidth,
+          imageHeight,
+        ) ?? expandBox(textBox, 0.18);
 
       return {
         original,
@@ -64,7 +74,8 @@ function parseBubbles(
           typeof b.readingOrder === "number" && Number.isFinite(b.readingOrder)
             ? b.readingOrder
             : index + 1,
-        box,
+        box: textBox,
+        bubbleBox,
       } satisfies BubbleResult;
     })
     .filter((b): b is BubbleResult => b !== null)
@@ -159,28 +170,37 @@ export async function POST(request: Request) {
         ? `Görsel boyutu yaklaşık ${imageWidth}x${imageHeight}px.`
         : "";
 
-    const prompt = `Sen bir manga/çizgi roman çevirmenisin. Her balondaki metni bul; sonra o metnin yerini tamamen kaplayacak şekilde çeviri üret.
+    const prompt = `Sen bir manga/çizgi roman çevirmenisin. Pipeline:
+1) Balonu algıla
+2) Yazıyı algıla
+3) Balon sınırını algıla
+4) Çeviriyi üret
 
 ${sizeHint}
 ${sourceHint}
 
-Kritik kurallar:
-1) Her balon için TEK box: o balondaki ORİJİNAL YAZININ tamamını kapsasın (bütün satırlar ve son kelime).
-2) box balonun beyaz İÇİNDE olsun. Siyah çerçeveyi/kuyruğu mümkün olduğunca alma; yazı box dışında kalmasın.
-3) box 0–1000 tam sayı (x,y sol-üst; w,h boyut).
-4) readingOrder: manga sağdan sola / yukarıdan aşağı — mevcut okuma akışı bozulmasın.
-5) Hedef dil: ${targetLanguage}.
-6) translated kısa ve net: balonun içine sığsın, anlam kalsın, gereksiz uzatma yok.
-7) Uydurma yok.
+Her metin bölgesi için JSON alanları:
+- textBox: ORİJİNAL YAZININ tamamını kapsayan kutu (tüm satırlar). Balon çerçevesini alma.
+- bubbleBox: Balonun tamamı (iç + sınır). Çerçevesiz/floating yazıysa textBox'u biraz büyütülmüş hali.
+- original / translated / readingOrder
+
+Kurallar:
+1) Koordinatlar 0–1000 tam sayı (x,y sol-üst; w,h boyut).
+2) textBox her zaman bubbleBox'un İÇİNDE olsun.
+3) readingOrder: manga sağdan sola / yukarıdan aşağı — akış bozulmasın.
+4) Hedef dil: ${targetLanguage}.
+5) translated kısa/net, balona sığsın; uzarsa anlamı koruyarak kısalt.
+6) Uydurma yok.
 
 SADECE JSON:
 {
   "bubbles": [
     {
       "original": "orijinal metnin tamamı",
-      "translated": "kısa, net, balona sığan çeviri",
+      "translated": "kısa çeviri",
       "readingOrder": 1,
-      "box": { "x": 120, "y": 80, "w": 240, "h": 160 }
+      "textBox": { "x": 140, "y": 100, "w": 200, "h": 120 },
+      "bubbleBox": { "x": 110, "y": 70, "w": 260, "h": 180 }
     }
   ]
 }
@@ -202,24 +222,14 @@ Metin yoksa {"bubbles": []}`;
           imageWidth,
           imageHeight,
         });
-
-        if (bubbles.length === 0) {
-          // Empty can be valid (no text), return success
-          return NextResponse.json({ bubbles, model: modelName });
-        }
-
         return NextResponse.json({ bubbles, model: modelName });
       } catch (error) {
         const message = errorMessage(error);
         failures.push(`${modelName}: ${message}`);
         console.error(`translate failed with ${modelName}`, error);
-
-        const hasNext = i < models.length - 1;
-        if (!hasNext) {
+        if (i >= models.length - 1) {
           return NextResponse.json(
-            {
-              error: `Tüm modeller başarısız oldu. ${failures.join(" | ")}`,
-            },
+            { error: `Tüm modeller başarısız oldu. ${failures.join(" | ")}` },
             { status: 500 },
           );
         }

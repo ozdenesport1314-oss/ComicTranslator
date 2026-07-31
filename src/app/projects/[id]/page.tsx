@@ -25,7 +25,9 @@ export default function ProjectDetailPage() {
   const params = useParams<{ id: string }>();
   const [project, setProject] = useState<ComicProject | null | undefined>(undefined);
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<"translated" | "original">("translated");
+  const [viewMode, setViewMode] = useState<"translated" | "original" | "redzone">(
+    "translated",
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,6 +46,9 @@ export default function ProjectDetailPage() {
 
   const displaySrc = useMemo(() => {
     if (!selectedPage) return null;
+    if (viewMode === "redzone" && selectedPage.debugImageDataUrl) {
+      return selectedPage.debugImageDataUrl;
+    }
     if (
       viewMode === "translated" &&
       selectedPage.translatedImageDataUrl &&
@@ -79,12 +84,13 @@ export default function ProjectDetailPage() {
       const page = updating.pages.find((p) => p.id === pageId);
       if (!page) return;
 
-      const { bubbles, translatedImageDataUrl } = await translatePageImage({
-        imageDataUrl: page.imageDataUrl,
-        mimeType: page.mimeType,
-        targetLanguage: languageLabel(updating.targetLanguage),
-        sourceLanguage: updating.sourceLanguage,
-      });
+      const { bubbles, translatedImageDataUrl, debugImageDataUrl } =
+        await translatePageImage({
+          imageDataUrl: page.imageDataUrl,
+          mimeType: page.mimeType,
+          targetLanguage: languageLabel(updating.targetLanguage),
+          sourceLanguage: updating.sourceLanguage,
+        });
 
       const latest = (await getProject(params.id)) ?? updating;
       const done: ComicProject = {
@@ -95,6 +101,7 @@ export default function ProjectDetailPage() {
                 ...p,
                 bubbles,
                 translatedImageDataUrl,
+                debugImageDataUrl,
                 status: "done",
                 error: undefined,
               }
@@ -166,16 +173,26 @@ export default function ProjectDetailPage() {
     setError(null);
     setViewMode("translated");
     try {
-      const translatedImageDataUrl = await reapplyBubblesToImage(
-        selectedPage.imageDataUrl,
-        selectedPage.bubbles,
-      );
+      const [translatedImageDataUrl, debugImageDataUrl] = await Promise.all([
+        reapplyBubblesToImage(selectedPage.imageDataUrl, selectedPage.bubbles, {
+          showRedzone: false,
+        }),
+        reapplyBubblesToImage(selectedPage.imageDataUrl, selectedPage.bubbles, {
+          showRedzone: true,
+        }),
+      ]);
       const latest = (await getProject(params.id)) ?? project;
       await persist({
         ...latest,
         pages: latest.pages.map((p) =>
           p.id === selectedPage.id
-            ? { ...p, translatedImageDataUrl, status: "done", error: undefined }
+            ? {
+                ...p,
+                translatedImageDataUrl,
+                debugImageDataUrl,
+                status: "done",
+                error: undefined,
+              }
             : p,
         ),
       });
@@ -291,6 +308,15 @@ export default function ProjectDetailPage() {
               >
                 Orijinal
               </button>
+              {selectedPage.debugImageDataUrl && (
+                <button
+                  type="button"
+                  className={`btn ${viewMode === "redzone" ? "btn-primary" : "btn-ghost"}`}
+                  onClick={() => setViewMode("redzone")}
+                >
+                  Redzone
+                </button>
+              )}
               <button type="button" className="btn btn-ghost" onClick={downloadTranslated}>
                 İndir
               </button>
@@ -342,7 +368,8 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              Gemini baloncuk konumunu bulur; çeviri doğrudan görsele yazılır.
+              Zemin → balon/yazı/sınır → redzone → maskele → çeviri. Redzone
+              görünümü algıyı gösterir.
             </p>
           </div>
 
