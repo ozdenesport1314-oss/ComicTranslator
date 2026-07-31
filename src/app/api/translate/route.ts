@@ -181,7 +181,7 @@ ${sourceHint}
 
 Her metin bölgesi için JSON alanları:
 - textBox: ORİJİNAL YAZININ tamamını kapsayan kutu (tüm satırlar). Balon çerçevesini alma.
-- bubbleBox: Balonun tamamı (iç + sınır). Çerçevesiz/floating yazıysa textBox'u biraz büyütülmüş hali.
+- bubbleBox: Balonun dış sınırına oturan kutu (tüm balon şekli). Maske bu balonun İÇ şekline flood-fill ile oturtulacak; bu yüzden bubbleBox balonu tam sarsın ama komşu paneli yutmasın.
 - original / translated / readingOrder
 
 Kurallar:
