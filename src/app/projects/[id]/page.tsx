@@ -368,8 +368,8 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              Redzone = balon kabuğu {"{"}…{"}"}. İçeride ***** orijinal silinir,
-              sonra Türkçe. Kenara değilmez.
+              Balon kabuğu korunur; harf maskesi medyan kağıt rengiyle temizlenir.
+              Türkçe punto balona göre büyütülür.
             </p>
           </div>
 

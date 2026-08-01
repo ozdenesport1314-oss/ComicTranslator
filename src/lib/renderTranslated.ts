@@ -696,41 +696,6 @@ function part4RecognizeTextInk(
   return out;
 }
 
-function samplePaperNear(
-  data: Uint8ClampedArray,
-  lum: Float32Array,
-  p: number,
-  rw: number,
-  rh: number,
-  kind: TextKind,
-): Rgb {
-  const y = Math.floor(p / rw);
-  const x = p - y * rw;
-  let r = 0;
-  let g = 0;
-  let b = 0;
-  let n = 0;
-  for (let dy = -4; dy <= 4; dy += 1) {
-    for (let dx = -4; dx <= 4; dx += 1) {
-      const nx = x + dx;
-      const ny = y + dy;
-      if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
-      const np = ny * rw + nx;
-      const v = lum[np];
-      const paper =
-        kind.mode === "light" ? v > kind.cut + 35 : v < kind.cut - 35;
-      if (!paper) continue;
-      const i = np * 4;
-      r += data[i];
-      g += data[i + 1];
-      b += data[i + 2];
-      n += 1;
-    }
-  }
-  if (!n) return kind.fill;
-  return { r: Math.round(r / n), g: Math.round(g / n), b: Math.round(b / n) };
-}
-
 /** PART 6 — Yazıyı silme: sadece ***** mask pikselleri */
 function part6EraseLetters(
   data: Uint8ClampedArray,
@@ -739,18 +704,15 @@ function part6EraseLetters(
   rh: number,
   kind: TextKind,
 ): number {
-  const lum = new Float32Array(rw * rh);
-  for (let p = 0, i = 0; p < rw * rh; p += 1, i += 4) {
-    lum[p] = luminance(data[i], data[i + 1], data[i + 2]);
-  }
   let wiped = 0;
   for (let p = 0; p < rw * rh; p += 1) {
     if (!mask[p]) continue;
-    const paper = samplePaperNear(data, lum, p, rw, rh, kind);
     const i = p * 4;
-    data[i] = paper.r;
-    data[i + 1] = paper.g;
-    data[i + 2] = paper.b;
+    // Local örnek koyu komşu harfleri içine alıp gri leke bırakıyordu.
+    // Balonun PART 2'de ölçülen medyan kağıt rengini yalnızca harf maskesine uygula.
+    data[i] = kind.fill.r;
+    data[i + 1] = kind.fill.g;
+    data[i + 2] = kind.fill.b;
     data[i + 3] = 255;
     wiped += 1;
   }
@@ -1302,18 +1264,20 @@ function part11WriteTranslation(
   stroke: Uint8Array,
 ) {
   const origLines = estimateLineCount(original || text);
+  const originalDriven = (Math.min(textPx.h, bounds.h) / origLines) * 1.05;
+  const bubbleDriven = Math.min(bounds.h * 0.34, bounds.w * 0.22);
   const targetFont = Math.max(
-    11,
-    Math.min(60, (Math.min(textPx.h, bounds.h) / origLines) * 0.7),
+    14,
+    Math.min(76, Math.max(originalDriven, bubbleDriven)),
   );
 
-  const padX = Math.max(6, bounds.w * 0.16);
-  const padY = Math.max(6, bounds.h * 0.16);
+  const padX = Math.max(5, bounds.w * 0.12);
+  const padY = Math.max(5, bounds.h * 0.12);
   const x = bounds.x + padX;
   const w = Math.max(8, bounds.w - padX * 2);
   const h = Math.max(8, bounds.h - padY * 2);
 
-  const minFont = Math.max(10, targetFont * 0.5);
+  const minFont = Math.max(12, targetFont * 0.48);
   const fitted = condenseToFit(ctx, text, w, h, minFont);
 
   let low = minFont;
