@@ -31,4 +31,5 @@ COPY --chown=user download_models.py pipeline.py app.py ./
 RUN python download_models.py --dir /home/user/models
 
 EXPOSE 7860
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
+# Port ortamdan okunur: Cloud Run PORT=8080 veriyor, Hugging Face 7860 bekliyor.
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-7860}"]

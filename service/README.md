@@ -63,7 +63,36 @@ CLEANUP_SERVICE_URL=http://127.0.0.1:8123
 pikseller, sarı = blok filtresinin elediği yanlış pozitifler, yeşil çerçeve =
 model yazı bloğu.
 
+## Deploy: Google Cloud Run
+
+Vercel bu servisi barındıramaz (300 MB model + ONNX çalışma zamanı).
+
+Gerekenler: faturalandırması açık bir Google Cloud projesi ve
+[gcloud CLI](https://cloud.google.com/sdk/docs/install).
+
+```powershell
+gcloud auth login
+cd service
+.\deploy_cloudrun.ps1 -ProjectId proje-kimligin
+```
+
+Script API'leri açar, imajı Cloud Build ile derler (modeller imaja gömülür) ve
+servisi 2 vCPU / 4 GiB ile yayına alır. Sonunda adresi yazar; onu Vercel'de
+`CLEANUP_SERVICE_URL` olarak ayarla.
+
+Bilinmesi gerekenler:
+
+- `--min-instances 0` olduğu için kullanılmadığında ücret işlemez, ama uyandıktan
+  sonraki ilk istek model yüklemesi nedeniyle 15-30 saniye bekler.
+- Servis varsayılan olarak kapalıdır. Vercel'den çağırmak için ya `-Public`
+  ekleyip herkese açarsın, ya da bir servis hesabı token'ını
+  `CLEANUP_SERVICE_TOKEN` olarak verirsin.
+- Ücretsiz kota (180k vCPU-saniye/ay) bu yükte binlerce sayfaya yeter.
+
 ## Deploy: Hugging Face Spaces
+
+Not: Hugging Face ücretsiz CPU'da Docker Space'i artık PRO aboneliğine bağladı;
+abonelik yoksa `create_repo` 402 döner.
 
 Vercel bu servisi barındıramaz (300 MB model + ONNX çalışma zamanı). Docker
 Space'i tek komutla yüklenir:
