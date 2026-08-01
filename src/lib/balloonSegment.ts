@@ -209,8 +209,12 @@ export function letterDomain(
     Math.round((text.x0 + text.x1) / 2),
     Math.round((text.y0 + text.y1) / 2),
   );
-  // Kağıt zemin yoksa yazı sanatın üstündedir; dokunmak hasar demektir.
-  if (!flood || flood.area < allowedArea * 0.35) return null;
+  // allowed sıkça balon dışındaki koyu sanata taşar; kağıt o alanı dolduramaz.
+  // Eski allowedArea*0.35 kapısı bu yüzden gerçek balon yazısını da reddediyordu.
+  // Ölçüt: yazı kutusu kadar anlamlı bir kağıt bölgesi var mı?
+  if (!flood || flood.area < textW * textH * 0.18) {
+    return inkNearPaper(lum, rw, rh, mode, text, opts);
+  }
 
   // Kağıt alanını genişletmek kutunun DIŞINDAKİ sanatı da siliyordu. Bunun
   // yerine kağıdın içinde kapalı kalan delikler (harfler) bölgeye katılır.
@@ -274,6 +278,80 @@ export function letterDomain(
       const p = y * rw + x;
       if (!grown[p] || !region[p]) continue;
       if (!core[p] && !notPaper(lum[p])) continue;
+      domain[p] = 1;
+      any += 1;
+    }
+  }
+  return any ? domain : inkNearPaper(lum, rw, rh, mode, text, opts);
+}
+
+/**
+ * Flood başarısız olsa bile: yazı kutusundaki mürekkep, yanında kağıt varsa
+ * silinir. Sanata doğrudan basılmış yazıda komşu kağıt olmadığı için null döner.
+ */
+export function inkNearPaper(
+  lum: Float32Array,
+  rw: number,
+  rh: number,
+  mode: "light" | "dark",
+  text: TextRect,
+  opts: { cut: number; paperLum: number },
+): Uint8Array | null {
+  const textW = Math.max(1, text.x1 - text.x0 + 1);
+  const textH = Math.max(1, text.y1 - text.y0 + 1);
+  const allowed: TextRect = {
+    x0: Math.max(0, text.x0 - Math.round(textW * 0.12 + 6)),
+    y0: Math.max(0, text.y0 - Math.round(textH * 0.2 + 6)),
+    x1: Math.min(rw - 1, text.x1 + Math.round(textW * 0.12 + 6)),
+    y1: Math.min(rh - 1, text.y1 + Math.round(textH * 0.2 + 6)),
+  };
+  const paperThr =
+    mode === "light"
+      ? Math.max(175, opts.paperLum - 40)
+      : Math.min(80, opts.paperLum + 40);
+  const paperAt = (v: number) =>
+    mode === "light" ? v >= paperThr : v <= paperThr;
+  const inkAt = (v: number) => (mode === "light" ? v < opts.cut : v > opts.cut);
+
+  const core = new Uint8Array(rw * rh);
+  let inkCount = 0;
+  for (let y = allowed.y0; y <= allowed.y1; y += 1) {
+    for (let x = allowed.x0; x <= allowed.x1; x += 1) {
+      const p = y * rw + x;
+      if (!inkAt(lum[p])) continue;
+      let nearPaper = false;
+      for (let dy = -3; dy <= 3 && !nearPaper; dy += 1) {
+        for (let dx = -3; dx <= 3; dx += 1) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < allowed.x0 || nx > allowed.x1 || ny < allowed.y0 || ny > allowed.y1) {
+            continue;
+          }
+          if (paperAt(lum[ny * rw + nx])) {
+            nearPaper = true;
+            break;
+          }
+        }
+      }
+      if (!nearPaper) continue;
+      core[p] = 1;
+      inkCount += 1;
+    }
+  }
+  if (inkCount < 12) return null;
+
+  const grown = dilate(dilate(core, rw, rh), rw, rh);
+  const domain = new Uint8Array(rw * rh);
+  let any = 0;
+  for (let y = allowed.y0; y <= allowed.y1; y += 1) {
+    for (let x = allowed.x0; x <= allowed.x1; x += 1) {
+      const p = y * rw + x;
+      if (!grown[p]) continue;
+      // Genişlemede yalnızca mürekkep/antialias; saf kağıdı alan yapma.
+      if (!core[p] && paperAt(lum[p])) continue;
+      if (!inkAt(lum[p]) && (mode === "light" ? lum[p] >= opts.paperLum - 8 : lum[p] <= opts.paperLum + 8)) {
+        continue;
+      }
       domain[p] = 1;
       any += 1;
     }
@@ -377,18 +455,21 @@ function balloonFromSeed(
     if (bw / bh > 6 || bh / bw > 6) continue;
     // Balon derli topludur; komşu beyaz alana sızmış dolgu dağınıktır. Düşük
     // doluluk kabul edilirse dolgu balon çizgisini yutup sanata taşıyor.
-    if (closedArea(flood.mask, rw, flood) / (bw * bh) < 0.6) continue;
-    // Gemini kutusu şekli belirlemez ama ÖLÇEK sınırıdır: balon o kutunun
-    // birkaç katı olamaz. Sızıntıyı bu yakalar.
-    if (hint) {
-      const hw = Math.max(1, hint.x1 - hint.x0 + 1);
-      const hh = Math.max(1, hint.y1 - hint.y0 + 1);
-      if (bw > hw * 1.8 + 24 || bh > hh * 1.8 + 24) continue;
-      if (flood.area > hw * hh * 2.2) continue;
-    }
+    if (closedArea(flood.mask, rw, flood) / (bw * bh) < 0.55) continue;
     // Yazı kutusu eksik gelse bile balon geçerli olmalı; ölçüt yazı boyu değil,
     // dolgunun çevresinde gerçek balon çizgisinin bulunması.
-    if (strokeRingRatio(lum, rw, rh, flood.mask, mode) < 0.5) continue;
+    const ring = strokeRingRatio(lum, rw, rh, flood.mask, mode);
+    if (ring < 0.45) continue;
+    // Gemini kutusu çoğu zaman metne yapışık; gerçek balon birkaç kat büyük
+    // olabilir. Güçlü stroke halkası varsa ölçek kapısını uygulamak yanlış
+    // negatif üretiyordu (metin temizlenmeden kalıyordu). Halka zayıfsa
+    // hint hâlâ sızıntı freni olarak kalsın.
+    if (hint && ring < 0.58) {
+      const hw = Math.max(1, hint.x1 - hint.x0 + 1);
+      const hh = Math.max(1, hint.y1 - hint.y0 + 1);
+      if (bw > hw * 2.4 + 32 || bh > hh * 2.4 + 32) continue;
+      if (flood.area > hw * hh * 3.2) continue;
+    }
     if (flood.area > bestArea) {
       bestArea = flood.area;
       best = flood.mask;
@@ -434,14 +515,20 @@ export function findEnclosedBalloons(
 ): Uint8Array | null {
   const fractions: Array<[number, number]> = [
     [0.5, 0.5],
-    [0.5, 0.2],
-    [0.5, 0.8],
-    [0.2, 0.5],
-    [0.8, 0.5],
-    [0.25, 0.25],
-    [0.75, 0.25],
-    [0.25, 0.75],
-    [0.75, 0.75],
+    [0.5, 0.15],
+    [0.5, 0.35],
+    [0.5, 0.65],
+    [0.5, 0.85],
+    [0.15, 0.5],
+    [0.35, 0.5],
+    [0.65, 0.5],
+    [0.85, 0.5],
+    [0.2, 0.2],
+    [0.8, 0.2],
+    [0.2, 0.8],
+    [0.8, 0.8],
+    [0.35, 0.35],
+    [0.65, 0.65],
   ];
   const union = new Uint8Array(lum.length);
   let found = false;

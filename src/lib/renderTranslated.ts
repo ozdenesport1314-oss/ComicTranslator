@@ -130,8 +130,10 @@ function balloonSearchWindow(
   width: number,
   height: number,
 ): PxBox {
-  const padX = Math.max(hintPx.w * 0.6, textPx.w * 0.75, 20);
-  const padY = Math.max(hintPx.h * 0.6, textPx.h * 1.0, 20);
+  // Dar pencere balonu kenarda keser → flood touchesEdge ile reddedilir.
+  // Gemini kutusu sıkça metne yapışık; payı geniş tut.
+  const padX = Math.max(hintPx.w * 0.9, textPx.w * 1.1, 36);
+  const padY = Math.max(hintPx.h * 0.9, textPx.h * 1.35, 36);
   const left = Math.min(textPx.x, hintPx.x) - padX;
   const top = Math.min(textPx.y, hintPx.y) - padY;
   const right = Math.max(textPx.x + textPx.w, hintPx.x + hintPx.w) + padX;

@@ -6,6 +6,7 @@
 import {
   findEnclosedBalloon,
   findEnclosedBalloons,
+  inkNearPaper,
   letterDomain,
   type TextRect,
 } from "../src/lib/balloonSegment";
@@ -340,6 +341,54 @@ const check = (name: string, pass: boolean, detail: string) =>
     "sanat içindeki beyaz şeritler balon sayılmadı",
     mask === null,
     mask ? `alan=${maskStats(mask, scene.rw).area}` : "null",
+  );
+}
+
+// --- Senaryo 13: Gemini kutusu balondan küçük → yine de balon bulunmalı ---
+{
+  const scene = blankScene(280, 220, 35);
+  fillEllipse(scene, 140, 110, 90, 70, 0);
+  fillEllipse(scene, 140, 110, 86, 66, 250);
+  addTextLines(scene, [[90, 90, 190, 130]]);
+  scene.text = { x0: 95, y0: 95, x1: 185, y1: 125 };
+  // Metne yapışık, gerçek balondan belirgin küçük hint
+  const hint: TextRect = { x0: 100, y0: 98, x1: 180, y1: 122 };
+  const mask = findEnclosedBalloon(
+    scene.lum,
+    scene.rw,
+    scene.rh,
+    "light",
+    scene.text,
+    hint,
+  );
+  const stats = mask ? maskStats(mask, scene.rw) : null;
+  check(
+    "küçük Gemini hint ile büyük balon bulundu",
+    !!mask && (stats?.area ?? 0) > 8000,
+    stats ? `alan=${stats.area}` : "null",
+  );
+}
+
+// --- Senaryo 14: inkNearPaper sanat üstünde çalışmaz, kağıtta çalışır ---
+{
+  const art = blankScene(200, 140, 45);
+  addTextLines(art, [[60, 50, 140, 90]]);
+  art.text = { x0: 60, y0: 50, x1: 140, y1: 90 };
+  const onArt = inkNearPaper(art.lum, art.rw, art.rh, "light", art.text, {
+    cut: 140,
+    paperLum: 250,
+  });
+  const paper = blankScene(200, 140, 250);
+  addTextLines(paper, [[60, 50, 140, 90]]);
+  paper.text = { x0: 60, y0: 50, x1: 140, y1: 90 };
+  const onPaper = inkNearPaper(paper.lum, paper.rw, paper.rh, "light", paper.text, {
+    cut: 140,
+    paperLum: 250,
+  });
+  check(
+    "inkNearPaper yalnız kağıt üstünde mürekkep seçer",
+    onArt === null && !!onPaper && onPaper.reduce((a, b) => a + b, 0) > 40,
+    `art=${onArt ? "var" : "null"} paper=${onPaper ? onPaper.reduce((a, b) => a + b, 0) : "null"}`,
   );
 }
 
