@@ -149,19 +149,23 @@ function isProtected(
   return false;
 }
 
+/**
+ * Silme izni: redzone/stroke dışında serbest.
+ * Interior zorunlu değildi — flood kaçırınca maske boş kalıp skor %0 oluyordu.
+ * Crop zaten textBox; sınır koruması redzone ile.
+ */
 function canEraseAt(
   gx: number,
   gy: number,
   width: number,
   height: number,
-  interior: Uint8Array,
+  _interior: Uint8Array,
   redzone: Uint8Array,
   stroke: Uint8Array,
 ): boolean {
   if (gx < 0 || gy < 0 || gx >= width || gy >= height) return false;
   const g = gy * width + gx;
-  if (!interior[g]) return false;
-  // pad=1: küçük balonda pad=2 interior'ı sıfırlıyordu → silme yok + "temiz" yalanı
+  if (redzone[g] || stroke[g]) return false;
   if (isProtected(gx, gy, width, height, redzone, stroke, 1)) return false;
   return true;
 }
@@ -175,9 +179,15 @@ function looksLikeInk(
   cut: number,
 ): boolean {
   const v = lum[p];
-  const core = mode === "light" ? v <= cut : v >= cut;
-  if (!core) return false;
-  // Yerel kontrast: kağıdı beyaz dikdörtgen diye silme
+  // Comic bold ink is typically very dark on light bubbles
+  if (mode === "light") {
+    if (v > cut) return false;
+    if (v <= 95) return true; // kesin mürekkep
+  } else {
+    if (v < cut) return false;
+    if (v >= 170) return true;
+  }
+  // Antialias kenarı: kağıda göre kontrast
   const y = Math.floor(p / rw);
   const x = p - y * rw;
   let paper = 0;
@@ -189,16 +199,16 @@ function looksLikeInk(
       const ny = y + dy;
       if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
       const nv = lum[ny * rw + nx];
-      const isPaper = mode === "light" ? nv > cut + 25 : nv < cut - 25;
+      const isPaper = mode === "light" ? nv > cut + 20 : nv < cut - 20;
       if (isPaper) {
         paper += nv;
         n += 1;
       }
     }
   }
-  if (!n) return mode === "light" ? v < 110 : v > 145;
+  if (!n) return mode === "light" ? v < 125 : v > 140;
   const paperAvg = paper / n;
-  return mode === "light" ? paperAvg - v >= 28 : v - paperAvg >= 28;
+  return mode === "light" ? paperAvg - v >= 18 : v - paperAvg >= 18;
 }
 
 /** Ham mürekkep sayısı — solidRect filtresi YOK (kalan İngilizceyi gizlemesin) */
@@ -625,12 +635,13 @@ function part4RecognizeTextInk(
     if (looksLikeInk(lum, p, rw, rh, kind.mode, cut)) ink[p] = 1;
   }
 
-  // Connected components — reject giant solid blobs (rect artifacts)
+  // Component filter: sadece devasa panel dolgusunu ele (yazı bloğunu DEĞİL).
+  // Eski solidRect + %12 maxArea tüm İngilizce diyalogu eliyordu → maske boş → skor %0.
   const labels = new Int32Array(rw * rh).fill(-1);
   const keep = new Uint8Array(rw * rh);
   const stack: number[] = [];
-  const minSize = sensitive ? 2 : 4;
-  const maxArea = Math.max(80, Math.floor(rw * rh * 0.12));
+  const minSize = sensitive ? 1 : 2;
+  const maxArea = Math.max(200, Math.floor(rw * rh * 0.65));
 
   for (let start = 0; start < rw * rh; start += 1) {
     if (!ink[start] || labels[start] >= 0) continue;
@@ -666,11 +677,23 @@ function part4RecognizeTextInk(
     const bw = maxX - minX + 1;
     const bh = maxY - minY + 1;
     const fillRatio = pixels.length / Math.max(1, bw * bh);
-    const solidRect = fillRatio > 0.78 && pixels.length > 40 && bw > 8 && bh > 8;
+    // Sadece neredeyse dolu crop-boyutu blok = gerçek dikdörtgen artefakt
+    const solidPanel =
+      fillRatio > 0.92 &&
+      pixels.length > maxArea * 0.8 &&
+      bw > rw * 0.85 &&
+      bh > rh * 0.85;
     const tooBig = pixels.length > maxArea;
-    if (pixels.length >= minSize && !tooBig && !solidRect) {
+    if (pixels.length >= minSize && !tooBig && !solidPanel) {
       for (const p of pixels) keep[p] = 1;
     }
+  }
+
+  // Hiç component kalmadıysa ham ink kullan (boş maske felaketi)
+  let kept = 0;
+  for (let i = 0; i < keep.length; i += 1) if (keep[i]) kept += 1;
+  if (kept < 8) {
+    for (let i = 0; i < ink.length; i += 1) keep[i] = ink[i];
   }
 
   // Dilate 1px (antialias halo) — still letter-shaped, not a box

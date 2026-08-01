@@ -368,8 +368,8 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              3 zincir: yüzeysel → residual Telea → nokta/çizgi ince ayar. Test
-              eşiği %90; geçen balona çeviri yazılır.
+              3 zincir silme (maske boş kalma bug’ı düzeltildi). Eşik %90 —
+              sorun eşik değil, silmenin çalışmasıydı.
             </p>
           </div>
 
