@@ -496,6 +496,28 @@ function inkCoverage(scene: Scene, mask: Uint8Array | null, cut: number) {
   );
 }
 
+// --- Senaryo 18: model kutusu yazıya yapışık (harfler sınıra dokunuyor) ---
+{
+  const scene = blankScene(240, 160, 250);
+  addTextLines(scene, [[60, 60, 180, 100]]);
+  // Kutu tam harflerin üstünde: pay yok
+  scene.text = { x0: 60, y0: 60, x1: 180, y1: 100 };
+  const letters = inkComponentsOnPaper(
+    scene.lum,
+    scene.rw,
+    scene.rh,
+    "light",
+    scene.text,
+    { cut: 140, paperLum: 250 },
+  );
+  const coverage = inkCoverage(scene, letters, 140);
+  check(
+    "yazıya yapışık kutuda harfler yine bulunuyor",
+    coverage > 0.9,
+    `kapsama=${coverage.toFixed(2)}`,
+  );
+}
+
 let failed = 0;
 for (const r of results) {
   if (!r.pass) failed += 1;

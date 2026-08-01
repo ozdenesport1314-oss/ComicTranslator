@@ -308,11 +308,13 @@ export function inkComponentsOnPaper(
 ): Uint8Array | null {
   const textW = Math.max(1, text.x1 - text.x0 + 1);
   const textH = Math.max(1, text.y1 - text.y0 + 1);
+  // Model kutuları yazıya YAPIŞIK gelir; pay küçük olursa harfler sınıra
+  // dokunur ve aşağıdaki sınır kuralı hepsini eleyip balonu atlıyordu.
   const allowed: TextRect = {
-    x0: Math.max(0, text.x0 - Math.round(textW * 0.1 + 6)),
-    y0: Math.max(0, text.y0 - Math.round(textH * 0.18 + 6)),
-    x1: Math.min(rw - 1, text.x1 + Math.round(textW * 0.1 + 6)),
-    y1: Math.min(rh - 1, text.y1 + Math.round(textH * 0.18 + 6)),
+    x0: Math.max(0, text.x0 - Math.max(14, Math.round(textW * 0.18))),
+    y0: Math.max(0, text.y0 - Math.max(14, Math.round(textH * 0.28))),
+    x1: Math.min(rw - 1, text.x1 + Math.max(14, Math.round(textW * 0.18))),
+    y1: Math.min(rh - 1, text.y1 + Math.max(14, Math.round(textH * 0.28))),
   };
   const aw = allowed.x1 - allowed.x0 + 1;
   const ah = allowed.y1 - allowed.y0 + 1;
@@ -327,9 +329,23 @@ export function inkComponentsOnPaper(
   const isInk = (v: number) =>
     mode === "light" ? v < opts.cut : v > opts.cut;
 
+  // Bileşenler `allowed` ile KIRPILMAZ. Kırpınca dışarıdan giren tarama
+  // çizgisinin parçası harf boyutunda görünüp kabul ediliyor ve sanat siliniyor.
+  // Etiketleme daha geniş pencerede yapılır, karar bileşenin gerçek boyutuna
+  // göre verilir.
+  const margin = Math.max(20, Math.round(textH));
+  const scan: TextRect = {
+    x0: Math.max(0, allowed.x0 - margin),
+    y0: Math.max(0, allowed.y0 - margin),
+    x1: Math.min(rw - 1, allowed.x1 + margin),
+    y1: Math.min(rh - 1, allowed.y1 + margin),
+  };
+  const sw = scan.x1 - scan.x0 + 1;
+  const sh = scan.y1 - scan.y0 + 1;
+
   const visited = new Uint8Array(rw * rh);
   const accepted = new Uint8Array(rw * rh);
-  const queue = new Int32Array(aw * ah);
+  const queue = new Int32Array(sw * sh);
   const pixels: number[] = [];
   let anyAccepted = false;
 
@@ -358,12 +374,7 @@ export function inkComponentsOnPaper(
         if (x > maxX) maxX = x;
         if (y < minY) minY = y;
         if (y > maxY) maxY = y;
-        if (
-          x === allowed.x0 ||
-          x === allowed.x1 ||
-          y === allowed.y0 ||
-          y === allowed.y1
-        ) {
+        if (x === scan.x0 || x === scan.x1 || y === scan.y0 || y === scan.y1) {
           touchesBorder = true;
         }
         for (const [dx, dy] of [
@@ -378,12 +389,7 @@ export function inkComponentsOnPaper(
         ] as const) {
           const nx = x + dx;
           const ny = y + dy;
-          if (
-            nx < allowed.x0 ||
-            nx > allowed.x1 ||
-            ny < allowed.y0 ||
-            ny > allowed.y1
-          ) {
+          if (nx < scan.x0 || nx > scan.x1 || ny < scan.y0 || ny > scan.y1) {
             continue;
           }
           const np = ny * rw + nx;
@@ -393,20 +399,27 @@ export function inkComponentsOnPaper(
         }
       }
 
-      // Kutu sınırını aşan bileşen sanattır (hatch/çerçeve), harf değil.
+      // Tarama penceresinin dışına uzanan bileşen sanattır, harf değil.
       if (touchesBorder) continue;
       const area = pixels.length;
       if (area < 4) continue;
       const bw = maxX - minX + 1;
       const bh = maxY - minY + 1;
+      // Harf, yazı kutusundan büyük olamaz; hatch/çerçeve çizgileri uzundur.
       if (bh > textH + 8) continue;
       if (bw > textW * 0.9 + 6) continue;
+      // Bileşen yazının yanında olmalı: merkezi izinli kutunun içinde kalsın.
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      if (cx < allowed.x0 || cx > allowed.x1 || cy < allowed.y0 || cy > allowed.y1) {
+        continue;
+      }
 
       // Harfin çevresi kağıttır; hatch çizgisinin çevresi başka çizgidir.
       let ring = 0;
       let ringPaper = 0;
-      for (let y = Math.max(allowed.y0, minY - 2); y <= Math.min(allowed.y1, maxY + 2); y += 1) {
-        for (let x = Math.max(allowed.x0, minX - 2); x <= Math.min(allowed.x1, maxX + 2); x += 1) {
+      for (let y = Math.max(scan.y0, minY - 2); y <= Math.min(scan.y1, maxY + 2); y += 1) {
+        for (let x = Math.max(scan.x0, minX - 2); x <= Math.min(scan.x1, maxX + 2); x += 1) {
           const p = y * rw + x;
           if (visited[p] && isInk(lum[p])) continue;
           const nearX = x >= minX - 2 && x <= maxX + 2;
