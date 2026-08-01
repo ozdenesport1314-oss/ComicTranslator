@@ -39,9 +39,17 @@ export async function POST(request: Request) {
   }
 
   try {
+    // Gizli bir Hugging Face Space'e istek yetki başlığı ister; adres açıksa
+    // değişken tanımsız kalır ve başlık gönderilmez.
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    const token = process.env.CLEANUP_SERVICE_TOKEN;
+    if (token) headers.Authorization = `Bearer ${token}`;
+
     const response = await fetch(`${serviceUrl.replace(/\/$/, "")}/clean`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({
         imageBase64: body.imageBase64,
         threshold: body.threshold ?? 0.3,

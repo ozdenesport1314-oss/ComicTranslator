@@ -13,6 +13,8 @@ from __future__ import annotations
 import base64
 import os
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 import cv2
@@ -23,7 +25,17 @@ from pydantic import BaseModel
 
 from pipeline import MangaCleaner
 
-app = FastAPI(title="ComicTranslator cleanup", version="1.0")
+cleaner: MangaCleaner | None = None
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    global cleaner
+    cleaner = MangaCleaner()
+    yield
+
+
+app = FastAPI(title="ComicTranslator cleanup", version="1.0", lifespan=lifespan)
 
 # Tarayıcıdan doğrudan çağrı yapılabilsin (yerel geliştirme).
 origins = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
@@ -33,9 +45,6 @@ app.add_middleware(
     allow_methods=["POST", "GET", "OPTIONS"],
     allow_headers=["*"],
 )
-
-cleaner: MangaCleaner | None = None
-
 
 class CleanRequest(BaseModel):
     imageBase64: str
@@ -51,12 +60,6 @@ class CleanResponse(BaseModel):
     coverage: float
     blocks: int
     ms: int
-
-
-@app.on_event("startup")
-def _load() -> None:
-    global cleaner
-    cleaner = MangaCleaner()
 
 
 @app.get("/health")

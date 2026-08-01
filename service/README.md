@@ -63,15 +63,38 @@ CLEANUP_SERVICE_URL=http://127.0.0.1:8123
 pikseller, sarı = blok filtresinin elediği yanlış pozitifler, yeşil çerçeve =
 model yazı bloğu.
 
-## Deploy
+## Deploy: Hugging Face Spaces
 
 Vercel bu servisi barındıramaz (300 MB model + ONNX çalışma zamanı). Docker
-imajı herhangi bir konteyner hostunda çalışır:
+Space'i tek komutla yüklenir:
+
+```powershell
+$env:HF_TOKEN = "hf_..."   # huggingface.co/settings/tokens, write yetkisi
+cd service
+.\.venv\Scripts\python.exe deploy_space.py kullanici/comic-cleanup
+```
+
+Space varsayılan olarak **gizli** oluşturulur; herkese açık istiyorsan
+`--public` ekle. İmaj derlemesi modelleri indirdiği için ilk kurulum birkaç
+dakika sürer, Space sayfasındaki Logs sekmesinden izlenebilir.
+
+Sonra Vercel projesinde:
+
+```
+CLEANUP_SERVICE_URL=https://kullanici-comic-cleanup.hf.space
+CLEANUP_SERVICE_TOKEN=hf_...      # yalnızca Space gizliyse
+```
+
+Bilinmesi gerekenler:
+
+- Ücretsiz CPU Space'i 2 vCPU'dur; sayfa başına süre yerelde ~6 saniye,
+  Space'te ~15-30 saniye olur.
+- Ücretsiz Space 48 saat işlem görmezse uyur; uyandıktan sonraki ilk istek
+  bir dakikaya kadar bekler.
+
+## Deploy: kendi konteyner hostun
 
 ```bash
 docker build -t comic-cleanup service
-docker run -p 8000:8000 comic-cleanup
+docker run -p 7860:7860 comic-cleanup
 ```
-
-Sonra Vercel projesinde `CLEANUP_SERVICE_URL` değişkenini servisin genel
-adresine ayarla.
