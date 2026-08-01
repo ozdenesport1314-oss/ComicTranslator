@@ -5,6 +5,7 @@
  */
 import {
   findEnclosedBalloon,
+  findEnclosedBalloons,
   letterDomain,
   type TextRect,
 } from "../src/lib/balloonSegment";
@@ -276,6 +277,69 @@ const check = (name: string, pass: boolean, detail: string) =>
     "silme alanı beyaz kutunun dışına taşmadı",
     !!domain && inside > 100 && outside === 0,
     `iç=${inside} dış=${outside}`,
+  );
+}
+
+// --- Senaryo 11: model iki balonu tek kutuda birleştirdi → ikisi de bulunmalı ---
+{
+  const scene = blankScene(320, 300, 30);
+  fillEllipse(scene, 160, 80, 55, 34, 0);
+  fillEllipse(scene, 160, 80, 52, 31, 250);
+  addTextLines(scene, [[125, 70, 195, 90]]);
+  fillEllipse(scene, 160, 210, 80, 58, 0);
+  fillEllipse(scene, 160, 210, 77, 55, 250);
+  addTextLines(scene, [[105, 185, 215, 235]]);
+  // Tek kutu iki balonu birden kapsıyor
+  scene.text = { x0: 105, y0: 70, x1: 215, y1: 235 };
+  const hint: TextRect = { x0: 78, y0: 44, x1: 242, y1: 270 };
+
+  const single = findEnclosedBalloon(
+    scene.lum,
+    scene.rw,
+    scene.rh,
+    "light",
+    scene.text,
+    hint,
+  );
+  const both = findEnclosedBalloons(
+    scene.lum,
+    scene.rw,
+    scene.rh,
+    "light",
+    scene.text,
+    hint,
+  );
+  // Kontrol noktaları harf bantlarının dışında, balon içinde seçildi
+  const hitsUpper = both ? both[60 * scene.rw + 160] === 1 : false;
+  const hitsLower = both ? both[165 * scene.rw + 160] === 1 : false;
+  const singleHitsBoth = single
+    ? single[60 * scene.rw + 160] === 1 && single[165 * scene.rw + 160] === 1
+    : false;
+  check(
+    "tek kutudaki iki balon da bulundu",
+    hitsUpper && hitsLower && !singleHitsBoth,
+    `üst=${hitsUpper} alt=${hitsLower} tekNoktaİkisi=${singleHitsBoth}`,
+  );
+}
+
+// --- Senaryo 12: yazı kutusu sanatın içindeyken beyaz boşluklar balon sayılmamalı ---
+{
+  const scene = blankScene(260, 200, 40);
+  for (let y = 30; y < 170; y += 6) fillRect(scene, 30, y, 230, y + 2, 250);
+  scene.text = { x0: 80, y0: 70, x1: 180, y1: 130 };
+  const hint: TextRect = { x0: 60, y0: 50, x1: 200, y1: 150 };
+  const mask = findEnclosedBalloons(
+    scene.lum,
+    scene.rw,
+    scene.rh,
+    "light",
+    scene.text,
+    hint,
+  );
+  check(
+    "sanat içindeki beyaz şeritler balon sayılmadı",
+    mask === null,
+    mask ? `alan=${maskStats(mask, scene.rw).area}` : "null",
   );
 }
 

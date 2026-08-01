@@ -34,9 +34,12 @@ export function floodPaper(
   if (inWin(seedX, seedY) && paperAt(lum[seedY * rw + seedX])) {
     seed = seedY * rw + seedX;
   } else {
+    // Harfin üstüne düşen tohum için yakındaki kağıdı ara. Arama bilerek kısa:
+    // uzaktaki kağıt başka bir bölgeye ait olur ve tarama da pahalılaşır.
+    const reach = 20;
     let bestD = Infinity;
-    for (let y = win.y0; y <= win.y1; y += 1) {
-      for (let x = win.x0; x <= win.x1; x += 1) {
+    for (let y = Math.max(win.y0, seedY - reach); y <= Math.min(win.y1, seedY + reach); y += 1) {
+      for (let x = Math.max(win.x0, seedX - reach); x <= Math.min(win.x1, seedX + reach); x += 1) {
         const p = y * rw + x;
         if (!paperAt(lum[p])) continue;
         const d = (x - seedX) * (x - seedX) + (y - seedY) * (y - seedY);
@@ -92,6 +95,61 @@ export function floodPaper(
   }
 
   return { mask, area, minX, minY, maxX, maxY, touchesEdge };
+}
+
+function maskAreaInRect(mask: Uint8Array, rw: number, rect: TextRect): number {
+  let n = 0;
+  for (let y = rect.y0; y <= rect.y1; y += 1) {
+    for (let x = rect.x0; x <= rect.x1; x += 1) {
+      if (mask[y * rw + x]) n += 1;
+    }
+  }
+  return n;
+}
+
+/**
+ * Maskenin kapalı delikleri (harfler) doldurulduktan sonraki alanı.
+ *
+ * Doluluk ölçümü ham kağıt dolgusunda yapılırsa yoğun yazılı balon "dağınık"
+ * görünüp reddediliyordu; ölçüm balon gövdesinde yapılmalı.
+ */
+function closedArea(
+  mask: Uint8Array,
+  rw: number,
+  bounds: { minX: number; minY: number; maxX: number; maxY: number },
+): number {
+  const w = bounds.maxX - bounds.minX + 1;
+  const h = bounds.maxY - bounds.minY + 1;
+  const exterior = new Uint8Array(w * h);
+  const stack: number[] = [];
+  const push = (lx: number, ly: number) => {
+    if (lx < 0 || ly < 0 || lx >= w || ly >= h) return;
+    const li = ly * w + lx;
+    if (exterior[li]) return;
+    if (mask[(bounds.minY + ly) * rw + (bounds.minX + lx)]) return;
+    exterior[li] = 1;
+    stack.push(li);
+  };
+  for (let x = 0; x < w; x += 1) {
+    push(x, 0);
+    push(x, h - 1);
+  }
+  for (let y = 0; y < h; y += 1) {
+    push(0, y);
+    push(w - 1, y);
+  }
+  while (stack.length) {
+    const li = stack.pop() as number;
+    const ly = Math.floor(li / w);
+    const lx = li - ly * w;
+    push(lx + 1, ly);
+    push(lx - 1, ly);
+    push(lx, ly + 1);
+    push(lx, ly - 1);
+  }
+  let n = 0;
+  for (let i = 0; i < w * h; i += 1) if (!exterior[i]) n += 1;
+  return n;
 }
 
 function dilate(src: Uint8Array, rw: number, rh: number): Uint8Array {
@@ -279,22 +337,16 @@ export function strokeRingRatio(
  * Pencere daraltmak sızıntıyı kurtarmaz (kağıt dışa bağlıysa her pencerede
  * taşar); kurtaran şey kağıt eşiğini sıkmaktır — halftone/gri köprüler kopar.
  */
-export function findEnclosedBalloon(
+function balloonFromSeed(
   lum: Float32Array,
   rw: number,
   rh: number,
   mode: "light" | "dark",
   text: TextRect,
-  hint?: TextRect,
+  hint: TextRect | undefined,
+  seedX: number,
+  seedY: number,
 ): Uint8Array | null {
-  const seedX = Math.round((text.x0 + text.x1) / 2);
-  const seedY = Math.round((text.y0 + text.y1) / 2);
-  const textW = Math.max(1, text.x1 - text.x0 + 1);
-  const textH = Math.max(1, text.y1 - text.y0 + 1);
-  const textArea = textW * textH;
-  const slackX = Math.max(4, textW * 0.12);
-  const slackY = Math.max(4, textH * 0.12);
-
   const win: TextRect = { x0: 0, y0: 0, x1: rw - 1, y1: rh - 1 };
   const winArea = rw * rh;
   const thresholds =
@@ -309,17 +361,23 @@ export function findEnclosedBalloon(
     const flood = floodPaper(lum, rw, win, paperAt, seedX, seedY);
     if (!flood || flood.touchesEdge) continue;
     if (flood.area > winArea * 0.7) continue;
-    if (flood.area < textArea * 0.2) continue;
-    // Balon yazının tamamını sarmalı
-    if (flood.minX > text.x0 + slackX || flood.maxX < text.x1 - slackX) continue;
-    if (flood.minY > text.y0 + slackY || flood.maxY < text.y1 - slackY) continue;
+    if (flood.area < 400) continue;
+    // Tohum yazı kutusundan geldiği için dolgu zaten yazının yerinde; burada
+    // sadece kutuyla gerçekten kesiştiğini doğrularız. "Yazının tamamını sar"
+    // kuralı, model iki balonu tek kutuda birleştirdiğinde ikisini de
+    // reddediyordu.
+    if (maskAreaInRect(flood.mask, rw, text) < 25) continue;
     // Pencereyi baştan sona kaplayan dolgu = sızıntı
     const bw = flood.maxX - flood.minX + 1;
     const bh = flood.maxY - flood.minY + 1;
     if (bw > rw * 0.92 || bh > rh * 0.92) continue;
+    // Balon en az iki yönde belirli kalınlıkta ve aşırı uzun değildir; sanatın
+    // içindeki ince beyaz şeritler bu kapıdan geçmez.
+    if (bw < 14 || bh < 14) continue;
+    if (bw / bh > 6 || bh / bw > 6) continue;
     // Balon derli topludur; komşu beyaz alana sızmış dolgu dağınıktır. Düşük
     // doluluk kabul edilirse dolgu balon çizgisini yutup sanata taşıyor.
-    if (flood.area / (bw * bh) < 0.6) continue;
+    if (closedArea(flood.mask, rw, flood) / (bw * bh) < 0.6) continue;
     // Gemini kutusu şekli belirlemez ama ÖLÇEK sınırıdır: balon o kutunun
     // birkaç katı olamaz. Sızıntıyı bu yakalar.
     if (hint) {
@@ -337,4 +395,66 @@ export function findEnclosedBalloon(
     }
   }
   return best;
+}
+
+/** Tek balon: yazı kutusunun merkezinden arar. */
+export function findEnclosedBalloon(
+  lum: Float32Array,
+  rw: number,
+  rh: number,
+  mode: "light" | "dark",
+  text: TextRect,
+  hint?: TextRect,
+): Uint8Array | null {
+  return balloonFromSeed(
+    lum,
+    rw,
+    rh,
+    mode,
+    text,
+    hint,
+    Math.round((text.x0 + text.x1) / 2),
+    Math.round((text.y0 + text.y1) / 2),
+  );
+}
+
+/**
+ * Yazı kutusuna dağılmış noktalardan arar ve bulunan balonları birleştirir.
+ *
+ * Model bazen iki ayrı balonu tek kutuda birleştiriyor; tek merkez noktası o
+ * durumda ya birini buluyor ya hiçbirini, ikinci balon temizlenmeden kalıyordu.
+ */
+export function findEnclosedBalloons(
+  lum: Float32Array,
+  rw: number,
+  rh: number,
+  mode: "light" | "dark",
+  text: TextRect,
+  hint?: TextRect,
+): Uint8Array | null {
+  const fractions: Array<[number, number]> = [
+    [0.5, 0.5],
+    [0.5, 0.2],
+    [0.5, 0.8],
+    [0.2, 0.5],
+    [0.8, 0.5],
+    [0.25, 0.25],
+    [0.75, 0.25],
+    [0.25, 0.75],
+    [0.75, 0.75],
+  ];
+  const union = new Uint8Array(lum.length);
+  let found = false;
+  for (const [fx, fy] of fractions) {
+    const sx = Math.round(text.x0 + (text.x1 - text.x0) * fx);
+    const sy = Math.round(text.y0 + (text.y1 - text.y0) * fy);
+    if (sx < 0 || sy < 0 || sx >= rw || sy >= rh) continue;
+    // Bulunmuş balonun içindeki nokta yeni bilgi vermez; taramayı da ucuz tutar.
+    if (union[sy * rw + sx]) continue;
+    const mask = balloonFromSeed(lum, rw, rh, mode, text, hint, sx, sy);
+    if (!mask) continue;
+    for (let p = 0; p < mask.length; p += 1) if (mask[p]) union[p] = 1;
+    found = true;
+  }
+  return found ? union : null;
 }

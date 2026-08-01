@@ -1,5 +1,5 @@
 import {
-  findEnclosedBalloon,
+  findEnclosedBalloons,
   letterDomain,
   type TextRect,
 } from "./balloonSegment";
@@ -572,7 +572,7 @@ function part3DefineBoundary(
   };
 
   // 1–2) Balonu gerçekten ara: kapalı kenar bulunamazsa balon yok kabul edilir.
-  const bubble = findEnclosedBalloon(lum, rw, rh, mode, text, hint);
+  const bubble = findEnclosedBalloons(lum, rw, rh, mode, text, hint);
   if (!bubble) return letterOnly();
 
   // 3) Morphological CLOSE — harf deliklerini kapat → tam balon gövdesi
