@@ -299,7 +299,7 @@ export default function ProjectDetailPage() {
                 className={`btn ${viewMode === "translated" ? "btn-primary" : "btn-ghost"}`}
                 onClick={() => setViewMode("translated")}
               >
-                Çevrilmiş
+                Temizlenmiş
               </button>
               <button
                 type="button"
@@ -327,7 +327,7 @@ export default function ProjectDetailPage() {
                   disabled={busy}
                   onClick={() => void reapplyOverlay()}
                 >
-                  Görsele uygula
+                Temizliği uygula
                 </button>
               )}
             </div>
@@ -343,7 +343,7 @@ export default function ProjectDetailPage() {
                   disabled={busy}
                   onClick={() => void reapplyOverlay()}
                 >
-                  Çeviriyi görsele uygula
+                  Balon temizliğini uygula
                 </button>
               </div>
             )}
@@ -368,8 +368,8 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              Beyaz balon exact-shape temizlenir (dikdörtgen değil). Parçalı
-              metinler birleştirilir; tüm temizlikten sonra Türkçe yazılır.
+              Yalnızca balon temizliği aktif. Görsele hiçbir çeviri veya yeni
+              metin yazılmaz.
             </p>
           </div>
 

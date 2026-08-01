@@ -1669,7 +1669,7 @@ export async function renderTranslatedPage(
   analysisCtx.drawImage(img, 0, 0, width, height);
 
   const prepared = prepareAllBubbles(analysisCtx, width, height, bubbles);
-  let painted = 0;
+  let cleaned = 0;
   let skippedDirty = 0;
 
   // FAZ 2: bütün orijinal metinleri temizle. Bu fazda Türkçe yazılmaz.
@@ -1683,41 +1683,17 @@ export async function renderTranslatedPage(
       item.kind,
     );
     part10RepairBoundaryWithWidth(ctx, item.boundary, width);
-    if (
-      !item.clean ||
-      sameLanguageLeak(item.bubble.original, item.bubble.translated)
-    ) {
+    if (!item.clean) {
       skippedDirty += 1;
+    } else {
+      cleaned += 1;
     }
   }
 
-  // FAZ 3: temizlik tamamen bittikten sonra bütün Türkçe metinleri yaz.
-  // Böylece hiçbir sonraki detector, eklenmiş Türkçeyi tekrar analiz etmez/silmez.
-  for (const item of prepared) {
-    if (
-      !item.clean ||
-      sameLanguageLeak(item.bubble.original, item.bubble.translated) ||
-      !item.boundary.bounds
-    ) {
-      continue;
-    }
-    part11WriteTranslation(
-      ctx,
-      width,
-      height,
-      item.bubble.translated,
-      item.bubble.original,
-      item.textPx,
-      item.boundary.bounds,
-      item.kind,
-      item.boundary.interior,
-      item.boundary.redzone,
-      item.boundary.stroke,
-    );
-    painted += 1;
-  }
+  // FAZ 3 BİLEREK KAPALI:
+  // Şu anda hiçbir çeviri/orijinal metin çizilmez. Çıktı yalnızca temiz balondur.
 
-  if (painted === 0) {
+  if (cleaned === 0) {
     const pct = Math.round(CLEAN_THRESHOLD * 100);
     throw new Error(
       skippedDirty > 0
