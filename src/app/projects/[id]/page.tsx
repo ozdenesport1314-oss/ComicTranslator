@@ -368,8 +368,8 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              Balon kabuğu korunur; harf maskesi medyan kağıt rengiyle temizlenir.
-              Türkçe punto balona göre büyütülür.
+              Faz 1: tüm balon/redzone orijinalden. Faz 2: tüm yazıları sil.
+              Faz 3: tüm Türkçeleri yaz. Aynı balon parçaları birleştirilir.
             </p>
           </div>
 

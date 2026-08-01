@@ -1387,6 +1387,118 @@ function drawDebug(
   ctx.restore();
 }
 
+type PreparedBubble = {
+  bubble: BubbleTranslation;
+  bubblePx: PxBox;
+  textPx: PxBox;
+  kind: TextKind;
+  boundary: Boundary;
+  clean: boolean;
+};
+
+function boxIou(a: PxBox, b: PxBox): number {
+  const x0 = Math.max(a.x, b.x);
+  const y0 = Math.max(a.y, b.y);
+  const x1 = Math.min(a.x + a.w, b.x + b.w);
+  const y1 = Math.min(a.y + a.h, b.y + b.h);
+  const intersection = Math.max(0, x1 - x0) * Math.max(0, y1 - y0);
+  const union = a.w * a.h + b.w * b.h - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
+function unionBox(a: PxBox, b: PxBox): PxBox {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  const r = Math.max(a.x + a.w, b.x + b.w);
+  const bottom = Math.max(a.y + a.h, b.y + b.h);
+  return { x, y, w: r - x, h: bottom - y };
+}
+
+/**
+ * Aynı balondaki parça metinleri tek iş haline getirir.
+ * Örn. “HARDLY.” ve altındaki devam metni ayrı çevrilirse aynı balona iki kez
+ * yazılıp çarpışıyordu. bubbleBox IoU yüksekse tek metin / tek temizlik olur.
+ */
+function groupBubbleInputs(
+  bubbles: BubbleTranslation[],
+  width: number,
+  height: number,
+): Array<{ bubble: BubbleTranslation; bubblePx: PxBox; textPx: PxBox }> {
+  const grouped: Array<{
+    bubble: BubbleTranslation;
+    bubblePx: PxBox;
+    textPx: PxBox;
+  }> = [];
+
+  const ordered = [...bubbles].sort((a, b) => a.readingOrder - b.readingOrder);
+  for (const bubble of ordered) {
+    if (!bubble.box || !bubble.translated?.trim()) continue;
+    const bubblePx = toPx(part1FindBubble(bubble), width, height);
+    const textPx = clipTextInsideBubble(
+      toPx(bubble.box, width, height),
+      bubblePx,
+    );
+    const existing = grouped.find((g) => boxIou(g.bubblePx, bubblePx) >= 0.72);
+    if (!existing) {
+      grouped.push({ bubble: { ...bubble }, bubblePx, textPx });
+      continue;
+    }
+
+    existing.textPx = unionBox(existing.textPx, textPx);
+    existing.bubblePx = unionBox(existing.bubblePx, bubblePx);
+    existing.bubble = {
+      ...existing.bubble,
+      original: `${existing.bubble.original} ${bubble.original}`.trim(),
+      translated: `${existing.bubble.translated} ${bubble.translated}`.trim(),
+      readingOrder: Math.min(
+        existing.bubble.readingOrder,
+        bubble.readingOrder,
+      ),
+    };
+  }
+  return grouped;
+}
+
+/**
+ * FAZ 1: bütün geometriyi değişmeyen ORİJİNAL canvas'tan hazırlar.
+ * Bu fonksiyon silmez/yazmaz; sonraki balon önceki Türkçeyi asla analiz etmez.
+ */
+function prepareAllBubbles(
+  originalCtx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  bubbles: BubbleTranslation[],
+): PreparedBubble[] {
+  const prepared: PreparedBubble[] = [];
+  for (const item of groupBubbleInputs(bubbles, width, height)) {
+    const kind = part2UnderstandTextType(
+      originalCtx,
+      item.textPx,
+      width,
+      height,
+    );
+    const boundary = part3DefineBoundary(
+      originalCtx,
+      width,
+      height,
+      item.bubblePx,
+      item.textPx,
+      kind,
+    );
+    if (!boundary.bounds) continue;
+
+    // Aynı text bölgesinin tekrarlı Gemini kaydını at.
+    if (prepared.some((p) => boxIou(p.textPx, item.textPx) >= 0.82)) continue;
+    prepared.push({
+      ...item,
+      kind,
+      boundary,
+      clean: false,
+    });
+  }
+  return prepared;
+}
+
 /**
  * Redzone önizleme — ORİJİNAL üzerinde, silme/yazmadan ÖNCE.
  * Kırmızı = balon kenarı koruma, yeşil = silme+yazma alanı.
@@ -1407,31 +1519,26 @@ export async function renderRedzonePreview(
   if (!ctx) throw new Error("Canvas desteklenmiyor");
   ctx.drawImage(img, 0, 0, width, height);
 
-  const ordered = [...bubbles].sort((a, b) => a.readingOrder - b.readingOrder);
-  for (const bubble of ordered) {
-    if (!bubble.box) continue;
-    const bubblePx = toPx(part1FindBubble(bubble), width, height);
-    const textPx = clipTextInsideBubble(
-      toPx(bubble.box, width, height),
-      bubblePx,
-    );
-    const kind = part2UnderstandTextType(ctx, textPx, width, height);
-    const boundary = part3DefineBoundary(
-      ctx,
-      width,
-      height,
-      bubblePx,
-      textPx,
-      kind,
-    );
+  // Analiz ayrı, değişmeyen canvas'ta; debug çizimleri sonraki analizi bozmaz.
+  const analysisCanvas = document.createElement("canvas");
+  analysisCanvas.width = width;
+  analysisCanvas.height = height;
+  const analysisCtx = analysisCanvas.getContext("2d", {
+    willReadFrequently: true,
+  });
+  if (!analysisCtx) throw new Error("Canvas desteklenmiyor");
+  analysisCtx.drawImage(img, 0, 0, width, height);
+
+  const prepared = prepareAllBubbles(analysisCtx, width, height, bubbles);
+  for (const item of prepared) {
     drawDebug(
       ctx,
       width,
       height,
-      bubblePx,
-      textPx,
-      boundary.interior,
-      boundary.redzone,
+      item.bubblePx,
+      item.textPx,
+      item.boundary.interior,
+      item.boundary.redzone,
     );
   }
   return zemin.toDataURL("image/jpeg", 0.92);
@@ -1469,54 +1576,61 @@ export async function renderTranslatedPage(
   if (!ctx) throw new Error("Canvas desteklenmiyor");
   ctx.drawImage(img, 0, 0, width, height);
 
-  const ordered = [...bubbles].sort((a, b) => a.readingOrder - b.readingOrder);
+  // Değişmeyen analiz canvas'ı: tüm balon/redzone/maskeler burada hazırlanır.
+  const analysisCanvas = document.createElement("canvas");
+  analysisCanvas.width = width;
+  analysisCanvas.height = height;
+  const analysisCtx = analysisCanvas.getContext("2d", {
+    willReadFrequently: true,
+  });
+  if (!analysisCtx) throw new Error("Canvas desteklenmiyor");
+  analysisCtx.drawImage(img, 0, 0, width, height);
+
+  const prepared = prepareAllBubbles(analysisCtx, width, height, bubbles);
   let painted = 0;
   let skippedDirty = 0;
 
-  for (const bubble of ordered) {
-    if (!bubble.translated?.trim() || !bubble.box) continue;
-
-    const bubblePx = toPx(part1FindBubble(bubble), width, height);
-    const textPx = clipTextInsideBubble(
-      toPx(bubble.box, width, height),
-      bubblePx,
-    );
-
-    const kind = part2UnderstandTextType(ctx, textPx, width, height);
-
-    // PART 3 — redzone ÖNCE (balon kenarı)
-    const boundary = part3DefineBoundary(
+  // FAZ 2: bütün orijinal metinleri temizle. Bu fazda Türkçe yazılmaz.
+  for (const item of prepared) {
+    item.clean = eraseUntilClean(
       ctx,
       width,
       height,
-      bubblePx,
-      textPx,
-      kind,
+      item.textPx,
+      item.boundary,
+      item.kind,
     );
-    if (!boundary.bounds) continue;
-
-    // Silme: interior'da orijinal harf, redzone yasak
-    const clean = eraseUntilClean(ctx, width, height, textPx, boundary, kind);
-    part10RepairBoundaryWithWidth(ctx, boundary, width);
-
-    if (!clean || sameLanguageLeak(bubble.original, bubble.translated)) {
+    part10RepairBoundaryWithWidth(ctx, item.boundary, width);
+    if (
+      !item.clean ||
+      sameLanguageLeak(item.bubble.original, item.bubble.translated)
+    ) {
       skippedDirty += 1;
+    }
+  }
+
+  // FAZ 3: temizlik tamamen bittikten sonra bütün Türkçe metinleri yaz.
+  // Böylece hiçbir sonraki detector, eklenmiş Türkçeyi tekrar analiz etmez/silmez.
+  for (const item of prepared) {
+    if (
+      !item.clean ||
+      sameLanguageLeak(item.bubble.original, item.bubble.translated) ||
+      !item.boundary.bounds
+    ) {
       continue;
     }
-
-    // Yazma: yine redzone yasak
     part11WriteTranslation(
       ctx,
       width,
       height,
-      bubble.translated,
-      bubble.original,
-      textPx,
-      boundary.bounds,
-      kind,
-      boundary.interior,
-      boundary.redzone,
-      boundary.stroke,
+      item.bubble.translated,
+      item.bubble.original,
+      item.textPx,
+      item.boundary.bounds,
+      item.kind,
+      item.boundary.interior,
+      item.boundary.redzone,
+      item.boundary.stroke,
     );
     painted += 1;
   }
