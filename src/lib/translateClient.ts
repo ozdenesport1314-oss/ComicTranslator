@@ -1,5 +1,5 @@
 import { nanoid } from "nanoid";
-import { normalizeBubbleBox } from "./boxes";
+import { expandBox, normalizeBubbleBox } from "./boxes";
 import { compressDataUrl } from "./pdf";
 import { renderTranslatedPage, type RenderOptions } from "./renderTranslated";
 import type { BubbleTranslation } from "./types";
@@ -67,14 +67,34 @@ export async function translatePageImage(params: {
       size.height,
     );
     if (!box) continue;
+    let bubbleBox =
+      normalizeBubbleBox(bubble.bubbleBox, size.width, size.height) ??
+      expandBox(box, 0.22);
+
+    // Guarantee textBox stays inside bubbleBox
+    const x = Math.max(box.x, bubbleBox.x);
+    const y = Math.max(box.y, bubbleBox.y);
+    const r = Math.min(box.x + box.w, bubbleBox.x + bubbleBox.w);
+    const b = Math.min(box.y + box.h, bubbleBox.y + bubbleBox.h);
+    const clipped = {
+      x,
+      y,
+      w: Math.max(0.004, r - x),
+      h: Math.max(0.004, b - y),
+    };
+
+    // If clip collapsed, expand bubble around text
+    if (clipped.w < 0.01 || clipped.h < 0.01) {
+      bubbleBox = expandBox(box, 0.25);
+    }
+
     bubbles.push({
       id: nanoid(),
       original: bubble.original,
       translated: bubble.translated,
       readingOrder: bubble.readingOrder,
-      box,
-      bubbleBox:
-        normalizeBubbleBox(bubble.bubbleBox, size.width, size.height) ?? undefined,
+      box: clipped.w >= 0.01 && clipped.h >= 0.01 ? clipped : box,
+      bubbleBox,
     });
   }
 

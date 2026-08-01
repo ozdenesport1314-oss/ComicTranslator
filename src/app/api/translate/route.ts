@@ -170,29 +170,30 @@ export async function POST(request: Request) {
         ? `Görsel boyutu yaklaşık ${imageWidth}x${imageHeight}px.`
         : "";
 
-    const prompt = `Sen bir manga/çizgi roman çevirmenisin. Pipeline:
-1) Balonu algıla
-2) Yazıyı algıla
-3) Balon sınırını algıla
+    const prompt = `Sen bir manga/çizgi roman çevirmenisin. Sırayı BOZMA:
+
+ZİNCİR:
+1) Önce tüm YAZILARI algıla (her konuşma/düşünce metni)
+2) Her yazı için BALONU algıla
+3) Her balon için SINIRI (bubbleBox) ver
 4) Çeviriyi üret
 
 ${sizeHint}
 ${sourceHint}
 
-Her metin bölgesi için JSON alanları:
-- textBox: ORİJİNAL YAZININ tamamını kapsayan kutu (tüm satırlar). Balon çerçevesini alma.
-- bubbleBox: Balonun dış sınırına oturan kutu (tüm balon şekli). Maske bu balonun İÇ şekline flood-fill ile oturtulacak; bu yüzden bubbleBox balonu tam sarsın ama komşu paneli yutmasın.
-- original / translated / readingOrder
+JSON alanları (zorunlu):
+- original: görseldeki yazının tamamı (tüm satırlar)
+- translated: hedef dil çevirisi
+- readingOrder: okuma sırası (manga: sağdan sola, yukarıdan aşağı)
+- textBox: yazının tam kutusu (0–1000). Çerçeveyi ALMA, yazının tamamını KAPSA.
+- bubbleBox: balonun tamamını saran kutu (0–1000). Yazı bubbleBox'un İÇİNDE olmalı. Komşu paneli yutma.
 
 Kurallar:
 1) Koordinatlar 0–1000 tam sayı (x,y sol-üst; w,h boyut).
-2) textBox her zaman bubbleBox'un İÇİNDE olsun.
-3) readingOrder: manga sağdan sola / yukarıdan aşağı — akış bozulmasın.
-4) Hedef dil: ${targetLanguage}.
-5) translated profesyonel çizgi roman diyaloğu gibi olsun:
-   - Kısa, vurucu, doğal (ör. "NE DİYORSUN SEN YA?", "BİR... BATMAN.")
-   - Balona sığsın; uzarsa anlamı koruyarak kısalt
-6) Uydurma yok.
+2) textBox ⊆ bubbleBox (taşma yok).
+3) Hedef dil: ${targetLanguage}.
+4) translated kısa, vurucu, balona sığar; uzarsa anlamı koruyarak kısalt.
+5) Uydurma balon/yazı yok. Floating yazıysa bubbleBox ≈ textBox + küçük pay.
 
 SADECE JSON:
 {

@@ -7,6 +7,32 @@ export type RenderOptions = {
 
 type PxBox = { x: number; y: number; w: number; h: number };
 type Rgb = { r: number; g: number; b: number };
+type SegResult = {
+  interior: Uint8Array;
+  redzone: Uint8Array;
+  bounds: PxBox | null;
+  fill: Rgb;
+  mode: "light" | "dark";
+};
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Görsel yüklenemedi"));
+    img.src = src;
+  });
+}
+
+async function ensureComicFont() {
+  if (typeof document === "undefined" || !document.fonts?.load) return;
+  try {
+    await document.fonts.load('400 48px "Bangers"');
+    await document.fonts.load('700 48px "Comic Neue"');
+  } catch {
+    /* ignore */
+  }
+}
 
 function comicFontStack() {
   if (typeof document === "undefined") {
@@ -24,25 +50,6 @@ function comicFont(size: number) {
   return `400 ${size}px ${comicFontStack()}`;
 }
 
-function loadImage(src: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("Görsel yüklenemedi"));
-    img.src = src;
-  });
-}
-
-async function ensureComicFont() {
-  if (typeof document === "undefined" || !document.fonts?.load) return;
-  try {
-    await document.fonts.load('800 48px "Bangers"');
-    await document.fonts.load('700 48px "Comic Neue"');
-  } catch {
-    // fallback stack still works
-  }
-}
-
 function toPx(box: BubbleBox, width: number, height: number): PxBox {
   return {
     x: box.x * width,
@@ -53,7 +60,21 @@ function toPx(box: BubbleBox, width: number, height: number): PxBox {
 }
 
 function resolveBubbleBox(bubble: BubbleTranslation): BubbleBox {
-  return bubble.bubbleBox ?? expandBox(bubble.box, 0.22);
+  return bubble.bubbleBox ?? expandBox(bubble.box, 0.25);
+}
+
+/** textBox must stay inside bubbleBox */
+function clipTextInsideBubble(text: PxBox, bubble: PxBox): PxBox {
+  const x = Math.max(text.x, bubble.x + bubble.w * 0.04);
+  const y = Math.max(text.y, bubble.y + bubble.h * 0.04);
+  const r = Math.min(text.x + text.w, bubble.x + bubble.w * 0.96);
+  const b = Math.min(text.y + text.h, bubble.y + bubble.h * 0.96);
+  return {
+    x,
+    y,
+    w: Math.max(4, r - x),
+    h: Math.max(4, b - y),
+  };
 }
 
 function estimateLineCount(text: string): number {
@@ -70,157 +91,132 @@ function comicCase(text: string): string {
     .toLocaleUpperCase("tr-TR");
 }
 
-function sampleRegionMode(
-  lum: Float32Array,
-  data: Uint8ClampedArray,
-  rw: number,
-  rh: number,
-  x0: number,
-  y0: number,
-  box: PxBox,
-): { mode: "light" | "dark"; fill: Rgb } {
-  const tx0 = Math.max(0, Math.floor(box.x - x0));
-  const ty0 = Math.max(0, Math.floor(box.y - y0));
-  const tx1 = Math.min(rw, Math.ceil(box.x + box.w - x0));
-  const ty1 = Math.min(rh, Math.ceil(box.y + box.h - y0));
-
-  const samples: number[] = [];
-  let r = 0;
-  let g = 0;
-  let b = 0;
-  let n = 0;
-
-  for (let y = ty0; y < ty1; y += 2) {
-    for (let x = tx0; x < tx1; x += 2) {
-      const p = y * rw + x;
-      samples.push(lum[p]);
-      const i = p * 4;
-      // Prefer near-paper / near-ink extremes for fill color
-      if (lum[p] > 200 || lum[p] < 50) {
-        r += data[i];
-        g += data[i + 1];
-        b += data[i + 2];
-        n += 1;
-      }
-    }
-  }
-
-  samples.sort((a, c) => a - c);
-  const mid = samples[Math.floor(samples.length / 2)] ?? 220;
-  const mode: "light" | "dark" = mid >= 120 ? "light" : "dark";
-
-  if (n > 0) {
-    return {
-      mode,
-      fill:
-        mode === "light"
-          ? { r: 255, g: 255, b: 255 }
-          : {
-              r: Math.round(r / n),
-              g: Math.round(g / n),
-              b: Math.round(b / n),
-            },
-    };
-  }
-
-  return mode === "light"
-    ? { mode, fill: { r: 255, g: 255, b: 255 } }
-    : { mode, fill: { r: 0, g: 0, b: 0 } };
+function emptySeg(width: number, height: number): SegResult {
+  return {
+    interior: new Uint8Array(width * height),
+    redzone: new Uint8Array(width * height),
+    bounds: null,
+    fill: { r: 255, g: 255, b: 255 },
+    mode: "light",
+  };
 }
 
-function segmentBubbleInterior(
+function boundsFromMask(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  x0: number,
+  y0: number,
+  rw: number,
+  rh: number,
+): PxBox | null {
+  let minX = rw;
+  let minY = rh;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < rh; y += 1) {
+    for (let x = 0; x < rw; x += 1) {
+      if (!mask[(y0 + y) * width + (x0 + x)]) continue;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (maxX < 0) return null;
+  return { x: x0 + minX, y: y0 + minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+}
+
+/**
+ * STEP: balon sınırlarını algıla
+ * Flood-fill bubble interior, constrained to bubbleBox.
+ * Outer ring stops on dark strokes (outline); inner area may cross text ink.
+ */
+function detectBubbleBoundary(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
   bubblePx: PxBox,
   textPx: PxBox,
-): {
-  interior: Uint8Array;
-  redzone: Uint8Array;
-  bounds: PxBox | null;
-  fill: Rgb;
-  mode: "light" | "dark";
-} {
-  const pad = 6;
-  const x0 = Math.max(0, Math.floor(bubblePx.x - pad));
-  const y0 = Math.max(0, Math.floor(bubblePx.y - pad));
-  const x1 = Math.min(width, Math.ceil(bubblePx.x + bubblePx.w + pad));
-  const y1 = Math.min(height, Math.ceil(bubblePx.y + bubblePx.h + pad));
+): SegResult {
+  const x0 = Math.max(0, Math.floor(bubblePx.x));
+  const y0 = Math.max(0, Math.floor(bubblePx.y));
+  const x1 = Math.min(width, Math.ceil(bubblePx.x + bubblePx.w));
+  const y1 = Math.min(height, Math.ceil(bubblePx.y + bubblePx.h));
   const rw = x1 - x0;
   const rh = y1 - y0;
-
-  const interior = new Uint8Array(width * height);
-  const redzone = new Uint8Array(width * height);
-  const fallback = {
-    interior,
-    redzone,
-    bounds: null as PxBox | null,
-    fill: { r: 255, g: 255, b: 255 },
-    mode: "light" as const,
-  };
-  if (rw < 4 || rh < 4) return fallback;
+  if (rw < 6 || rh < 6) return emptySeg(width, height);
 
   const img = ctx.getImageData(x0, y0, rw, rh);
   const { data } = img;
   const lum = new Float32Array(rw * rh);
-  for (let i = 0, p = 0; p < rw * rh; p += 1, i += 4) {
+  for (let p = 0, i = 0; p < rw * rh; p += 1, i += 4) {
     lum[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
   }
 
-  const { mode, fill } = sampleRegionMode(lum, data, rw, rh, x0, y0, textPx);
-  const sorted = Float32Array.from(lum).sort();
-  const hi = sorted[Math.floor(sorted.length * 0.8)] ?? 240;
-  const lo = sorted[Math.floor(sorted.length * 0.2)] ?? 30;
+  // Mode from text region median
+  const samples: number[] = [];
+  const tx0 = Math.max(0, Math.floor(textPx.x - x0));
+  const ty0 = Math.max(0, Math.floor(textPx.y - y0));
+  const tx1 = Math.min(rw, Math.ceil(textPx.x + textPx.w - x0));
+  const ty1 = Math.min(rh, Math.ceil(textPx.y + textPx.h - y0));
+  for (let y = ty0; y < ty1; y += 2) {
+    for (let x = tx0; x < tx1; x += 2) samples.push(lum[y * rw + x]);
+  }
+  samples.sort((a, b) => a - b);
+  const median = samples[Math.floor(samples.length / 2)] ?? 220;
+  const mode: "light" | "dark" = median >= 110 ? "light" : "dark";
+  const fill: Rgb =
+    mode === "light" ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 };
 
-  // Walkable fill vs hard border depends on bubble type
-  const walkMin = mode === "light" ? Math.min(195, hi - 40) : 0;
-  const walkMax = mode === "light" ? 255 : Math.max(70, lo + 45);
-  const borderCut = mode === "light" ? 75 : 190;
-
-  const isWalkable = (v: number) =>
-    mode === "light" ? v >= walkMin : v <= walkMax;
-  const isHardBorder = (v: number) =>
-    mode === "light" ? v < borderCut : v > borderCut;
-
+  const ring = 0.1;
   const local = new Uint8Array(rw * rh);
-  const queue = new Int32Array(rw * rh);
+  const q = new Int32Array(rw * rh);
   let qh = 0;
   let qt = 0;
 
-  const trySeed = (sx: number, sy: number) => {
-    const lx = Math.floor(sx - x0);
-    const ly = Math.floor(sy - y0);
-    if (lx < 0 || ly < 0 || lx >= rw || ly >= rh) return false;
-    const p = ly * rw + lx;
-    if (!isWalkable(lum[p])) return false;
-    local[p] = 1;
-    queue[qt++] = p;
-    return true;
+  const inRing = (x: number, y: number) =>
+    x < rw * ring ||
+    y < rh * ring ||
+    x >= rw * (1 - ring) ||
+    y >= rh * (1 - ring);
+
+  const canEnter = (p: number, x: number, y: number) => {
+    const v = lum[p];
+    if (mode === "light") {
+      // Outer ring: only bright paper (stop at black border)
+      if (inRing(x, y)) return v >= 145;
+      // Inner: allow paper + gray + text ink (will be wiped)
+      return v >= 35;
+    }
+    // Dark bubble
+    if (inRing(x, y)) return v <= 110;
+    return v <= 220;
   };
 
-  const seeds: Array<[number, number]> = [
-    [textPx.x + textPx.w / 2, textPx.y + textPx.h / 2],
-    [textPx.x + textPx.w * 0.35, textPx.y + textPx.h * 0.4],
-    [textPx.x + textPx.w * 0.65, textPx.y + textPx.h * 0.4],
-    [textPx.x + textPx.w * 0.5, textPx.y + textPx.h * 0.65],
-    [bubblePx.x + bubblePx.w / 2, bubblePx.y + bubblePx.h / 2],
+  const seedPoints = [
+    [textPx.x + textPx.w * 0.5, textPx.y + textPx.h * 0.5],
+    [textPx.x + textPx.w * 0.3, textPx.y + textPx.h * 0.35],
+    [textPx.x + textPx.w * 0.7, textPx.y + textPx.h * 0.35],
+    [textPx.x + textPx.w * 0.5, textPx.y + textPx.h * 0.7],
+    [bubblePx.x + bubblePx.w * 0.5, bubblePx.y + bubblePx.h * 0.5],
   ];
 
-  let seeded = false;
-  for (const [sx, sy] of seeds) {
-    if (trySeed(sx, sy)) {
-      seeded = true;
-      break;
-    }
+  for (const [sx, sy] of seedPoints) {
+    const x = Math.floor(sx - x0);
+    const y = Math.floor(sy - y0);
+    if (x < 1 || y < 1 || x >= rw - 1 || y >= rh - 1) continue;
+    const p = y * rw + x;
+    if (!canEnter(p, x, y)) continue;
+    local[p] = 1;
+    q[qt++] = p;
+    break;
   }
 
-  if (!seeded) {
+  // Fallback seed: best matching pixel in text box
+  if (qt === 0) {
     let best = -1;
-    let bestScore = mode === "light" ? -1 : 999;
-    const tx0 = Math.max(0, Math.floor(textPx.x - x0));
-    const ty0 = Math.max(0, Math.floor(textPx.y - y0));
-    const tx1 = Math.min(rw, Math.ceil(textPx.x + textPx.w - x0));
-    const ty1 = Math.min(rh, Math.ceil(textPx.y + textPx.h - y0));
+    let bestScore = mode === "light" ? -1 : 9999;
     for (let y = ty0; y < ty1; y += 1) {
       for (let x = tx0; x < tx1; x += 1) {
         const p = y * rw + x;
@@ -233,130 +229,126 @@ function segmentBubbleInterior(
     }
     if (best >= 0) {
       local[best] = 1;
-      queue[qt++] = best;
-      seeded = true;
+      q[qt++] = best;
     }
   }
-  if (!seeded) return { ...fallback, fill, mode };
 
   while (qh < qt) {
-    const p = queue[qh++];
+    const p = q[qh++];
     const y = Math.floor(p / rw);
     const x = p - y * rw;
-    for (const n of [p - 1, p + 1, p - rw, p + rw]) {
-      if (n < 0 || n >= rw * rh) continue;
-      const ny = Math.floor(n / rw);
-      const nx = n - ny * rw;
-      if (Math.abs(nx - x) + Math.abs(ny - y) !== 1) continue;
+    for (const [dx, dy] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ] as const) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
+      const n = ny * rw + nx;
       if (local[n]) continue;
-      if (isHardBorder(lum[n])) continue;
-      if (!isWalkable(lum[n])) continue;
+      if (!canEnter(n, nx, ny)) continue;
       local[n] = 1;
-      queue[qt++] = n;
+      q[qt++] = n;
     }
   }
 
-  // Absorb opposite-tone text ink inside the bubble (thin strokes only)
-  const growIters = Math.max(8, Math.floor(Math.min(rw, rh) * 0.05));
-  for (let iter = 0; iter < growIters; iter += 1) {
+  // Grow a few times into leftover ink fully surrounded by interior
+  for (let iter = 0; iter < 10; iter += 1) {
     const add: number[] = [];
     for (let y = 1; y < rh - 1; y += 1) {
       for (let x = 1; x < rw - 1; x += 1) {
         const p = y * rw + x;
         if (local[p]) continue;
-        if (isHardBorder(lum[p]) && !isWalkable(lum[p])) {
-          // likely outline — skip unless heavily surrounded
-          let c = 0;
-          for (let dy = -1; dy <= 1; dy += 1) {
-            for (let dx = -1; dx <= 1; dx += 1) {
-              if (dx || dy) if (local[(y + dy) * rw + (x + dx)]) c += 1;
-            }
-          }
-          if (c >= 6) add.push(p);
-          continue;
-        }
         let c = 0;
         for (let dy = -1; dy <= 1; dy += 1) {
           for (let dx = -1; dx <= 1; dx += 1) {
             if (dx || dy) if (local[(y + dy) * rw + (x + dx)]) c += 1;
           }
         }
-        if (c >= 3) add.push(p);
+        if (c >= 4) add.push(p);
       }
     }
     if (!add.length) break;
     for (const p of add) local[p] = 1;
   }
 
-  // Redzone = border pixels touching interior
-  for (let y = 1; y < rh - 1; y += 1) {
-    for (let x = 1; x < rw - 1; x += 1) {
-      const p = y * rw + x;
-      if (local[p]) continue;
-      if (!isHardBorder(lum[p])) continue;
-      let touch = false;
-      for (let dy = -1; dy <= 1 && !touch; dy += 1) {
-        for (let dx = -1; dx <= 1; dx += 1) {
-          if (local[(y + dy) * rw + (x + dx)]) {
-            touch = true;
-            break;
-          }
-        }
+  // If flood captured almost nothing, fallback: soft ellipse inside bubble
+  let count = 0;
+  for (let i = 0; i < local.length; i += 1) if (local[i]) count += 1;
+  if (count < rw * rh * 0.08) {
+    const cx = rw / 2;
+    const cy = rh / 2;
+    const rx = rw * 0.42;
+    const ry = rh * 0.42;
+    for (let y = 0; y < rh; y += 1) {
+      for (let x = 0; x < rw; x += 1) {
+        const nx = (x - cx) / rx;
+        const ny = (y - cy) / ry;
+        if (nx * nx + ny * ny <= 1) local[y * rw + x] = 1;
       }
-      if (touch) redzone[(y0 + y) * width + (x0 + x)] = 1;
     }
   }
 
-  // Erode 1px so we never paint over the outline
-  const eroded = new Uint8Array(rw * rh);
+  const interior = new Uint8Array(width * height);
+  const redzone = new Uint8Array(width * height);
+
+  // Erode 1px — mask stays strictly inside border
   for (let y = 1; y < rh - 1; y += 1) {
     for (let x = 1; x < rw - 1; x += 1) {
       const p = y * rw + x;
       if (!local[p]) continue;
-      if (local[p - 1] && local[p + 1] && local[p - rw] && local[p + rw]) {
-        eroded[p] = 1;
+      if (!(local[p - 1] && local[p + 1] && local[p - rw] && local[p + rw])) {
+        redzone[(y0 + y) * width + (x0 + x)] = 1;
+        continue;
       }
-    }
-  }
-
-  let minX = rw;
-  let minY = rh;
-  let maxX = -1;
-  let maxY = -1;
-  for (let y = 0; y < rh; y += 1) {
-    for (let x = 0; x < rw; x += 1) {
-      if (!eroded[y * rw + x]) continue;
       interior[(y0 + y) * width + (x0 + x)] = 1;
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
     }
   }
 
-  if (maxX < 0) return { interior, redzone, bounds: null, fill, mode };
-
-  // Normalize fill to clean comic colors
-  const cleanFill =
-    mode === "light"
-      ? { r: 255, g: 255, b: 255 }
-      : { r: 0, g: 0, b: 0 };
-
-  return {
-    interior,
-    redzone,
-    bounds: {
-      x: x0 + minX,
-      y: y0 + minY,
-      w: maxX - minX + 1,
-      h: maxY - minY + 1,
-    },
-    fill: cleanFill,
-    mode,
-  };
+  const bounds = boundsFromMask(interior, width, height, x0, y0, rw, rh);
+  return { interior, redzone, bounds, fill, mode };
 }
 
-function wipeInteriorMask(
+/** STEP: yazı maskelemesi — only inside bubble boundary mask */
+function maskTextInsideBoundary(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  textPx: PxBox,
+  interior: Uint8Array,
+  fill: Rgb,
+) {
+  // Expand text a bit so no glyph remnants remain, still clipped by interior mask
+  const x0 = Math.max(0, Math.floor(textPx.x - textPx.w * 0.08));
+  const y0 = Math.max(0, Math.floor(textPx.y - textPx.h * 0.08));
+  const x1 = Math.min(width, Math.ceil(textPx.x + textPx.w * 1.08));
+  const y1 = Math.min(height, Math.ceil(textPx.y + textPx.h * 1.08));
+  const rw = x1 - x0;
+  const rh = y1 - y0;
+  if (rw < 2 || rh < 2) return;
+
+  const img = ctx.getImageData(x0, y0, rw, rh);
+  const { data } = img;
+
+  for (let row = 0; row < rh; row += 1) {
+    for (let col = 0; col < rw; col += 1) {
+      const gx = x0 + col;
+      const gy = y0 + row;
+      if (!interior[gy * width + gx]) continue; // MUST stay inside bubble boundary
+      const i = (row * rw + col) * 4;
+      data[i] = fill.r;
+      data[i + 1] = fill.g;
+      data[i + 2] = fill.b;
+      data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, x0, y0);
+}
+
+/** Fill full bubble interior (shape-matched) */
+function fillBubbleInterior(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
@@ -364,31 +356,26 @@ function wipeInteriorMask(
   bounds: PxBox,
   fill: Rgb,
 ) {
-  const ix = Math.max(0, Math.floor(bounds.x));
-  const iy = Math.max(0, Math.floor(bounds.y));
-  const iw = Math.max(1, Math.min(width - ix, Math.ceil(bounds.w)));
-  const ih = Math.max(1, Math.min(height - iy, Math.ceil(bounds.h)));
-  const imageData = ctx.getImageData(ix, iy, iw, ih);
-  const { data } = imageData;
-
-  for (let row = 0; row < ih; row += 1) {
-    for (let col = 0; col < iw; col += 1) {
-      if (!interior[(iy + row) * width + (ix + col)]) continue;
-      const i = (row * iw + col) * 4;
+  const x0 = Math.max(0, Math.floor(bounds.x));
+  const y0 = Math.max(0, Math.floor(bounds.y));
+  const rw = Math.min(width - x0, Math.ceil(bounds.w));
+  const rh = Math.min(height - y0, Math.ceil(bounds.h));
+  const img = ctx.getImageData(x0, y0, rw, rh);
+  const { data } = img;
+  for (let row = 0; row < rh; row += 1) {
+    for (let col = 0; col < rw; col += 1) {
+      if (!interior[(y0 + row) * width + (x0 + col)]) continue;
+      const i = (row * rw + col) * 4;
       data[i] = fill.r;
       data[i + 1] = fill.g;
       data[i + 2] = fill.b;
       data[i + 3] = 255;
     }
   }
-  ctx.putImageData(imageData, ix, iy);
+  ctx.putImageData(img, x0, y0);
 }
 
-function wrapText(
-  ctx: CanvasRenderingContext2D,
-  text: string,
-  maxWidth: number,
-): string[] {
+function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number) {
   const words = text.trim().split(/\s+/).filter(Boolean);
   if (!words.length) return [""];
   const lines: string[] = [];
@@ -426,10 +413,9 @@ function condenseToFit(
   maxWidth: number,
   maxHeight: number,
   minFont: number,
-): string {
+) {
   let candidate = comicCase(text);
   if (textFits(ctx, candidate, maxWidth, maxHeight, minFont).ok) return candidate;
-
   candidate = candidate
     .replace(/\b(GERÇEKTEN|ASLINDA|YANİ|İŞTE|BİRAZ|OLDUKÇA)\b/g, "")
     .replace(/\s{2,}/g, " ")
@@ -452,26 +438,26 @@ function condenseToFit(
   return best;
 }
 
-function placeComicLettering(
+/** STEP: çeviriyi balon sınırları içine yaz */
+function writeTranslationInsideBubble(
   ctx: CanvasRenderingContext2D,
   text: string,
   original: string,
   textPx: PxBox,
-  maskBounds: PxBox,
+  bounds: PxBox,
   mode: "light" | "dark",
 ) {
   const origLines = estimateLineCount(original || text);
-  const targetFont = Math.max(12, Math.min(72, (textPx.h / origLines) * 0.82));
+  const targetFont = Math.max(12, Math.min(72, (textPx.h / origLines) * 0.8));
 
-  // Margin inside bubble — like pro comics
-  const padX = Math.max(4, maskBounds.w * 0.14);
-  const padY = Math.max(4, maskBounds.h * 0.14);
-  const x = maskBounds.x + padX;
-  const y = maskBounds.y + padY;
-  const w = Math.max(8, maskBounds.w - padX * 2);
-  const h = Math.max(8, maskBounds.h - padY * 2);
+  const padX = Math.max(4, bounds.w * 0.14);
+  const padY = Math.max(4, bounds.h * 0.14);
+  const x = bounds.x + padX;
+  const y = bounds.y + padY;
+  const w = Math.max(8, bounds.w - padX * 2);
+  const h = Math.max(8, bounds.h - padY * 2);
 
-  const minFont = Math.max(11, targetFont * 0.6);
+  const minFont = Math.max(11, targetFont * 0.55);
   const fitted = condenseToFit(ctx, text, w, h, minFont);
 
   let low = minFont;
@@ -491,23 +477,17 @@ function placeComicLettering(
     } else high = mid - 1;
   }
 
-  const near = textFits(ctx, fitted, w, h, Math.floor(targetFont));
-  if (near.ok) {
-    bestSize = Math.floor(targetFont);
-    bestLines = near.lines;
-    lineHeight = near.lineHeight;
-  }
-
   ctx.font = comicFont(bestSize);
   ctx.fillStyle = mode === "light" ? "#111111" : "#ffffff";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
 
   const totalHeight = bestLines.length * lineHeight;
-  const cx = textPx.x + textPx.w / 2;
-  const cy = textPx.y + textPx.h / 2;
-  const drawX = Math.min(Math.max(cx, x + 2), x + w - 2);
+  // Center of refined bubble interior (not old wrong text box)
+  const cx = bounds.x + bounds.w / 2;
+  const cy = bounds.y + bounds.h / 2;
   let cursorY = cy - totalHeight / 2 + lineHeight / 2;
+  const drawX = Math.min(Math.max(cx, x + 2), x + w - 2);
 
   for (const line of bestLines) {
     ctx.fillText(line, drawX, cursorY, w);
@@ -528,13 +508,13 @@ function drawDebug(
   for (let i = 0; i < interior.length; i += 1) {
     const px = i * 4;
     if (redzone[i]) {
-      overlay.data[px] = Math.min(255, overlay.data[px] * 0.3 + 255 * 0.7);
-      overlay.data[px + 1] = overlay.data[px + 1] * 0.3;
-      overlay.data[px + 2] = overlay.data[px + 2] * 0.3;
+      overlay.data[px] = Math.min(255, overlay.data[px] * 0.25 + 255 * 0.75);
+      overlay.data[px + 1] = overlay.data[px + 1] * 0.25;
+      overlay.data[px + 2] = overlay.data[px + 2] * 0.25;
     } else if (interior[i]) {
-      overlay.data[px] = overlay.data[px] * 0.5;
-      overlay.data[px + 1] = Math.min(255, overlay.data[px + 1] * 0.5 + 200 * 0.5);
-      overlay.data[px + 2] = overlay.data[px + 2] * 0.5;
+      overlay.data[px] = overlay.data[px] * 0.45;
+      overlay.data[px + 1] = Math.min(255, overlay.data[px + 1] * 0.45 + 210 * 0.55);
+      overlay.data[px + 2] = overlay.data[px + 2] * 0.45;
     }
   }
   ctx.putImageData(overlay, 0, 0);
@@ -548,8 +528,14 @@ function drawDebug(
 }
 
 /**
- * Pro-comic style pipeline (like clean scanlation/lettering):
- * zemin → bubble shape mask → fill bubble color → comic lettering
+ * Zincir:
+ * 1) Yazıları algıla (API → textBox)
+ * 2) Balonları algıla (API → bubbleBox)
+ * 3) Balon sınırlarını algıla (flood-fill interior)
+ * 4) Yazı maskelemesi balon sınırları içinde
+ * 5) Yazılar maskelenir
+ * 6) Balon sınırları tekrar algılanır
+ * 7) O sınırlar içine çeviri yazılır
  */
 export async function renderTranslatedPage(
   imageDataUrl: string,
@@ -563,6 +549,7 @@ export async function renderTranslatedPage(
   const height = img.naturalHeight || img.height;
   if (!width || !height) throw new Error("Görsel boyutları okunamadı");
 
+  // Zemin
   const zemin = document.createElement("canvas");
   zemin.width = width;
   zemin.height = height;
@@ -570,61 +557,51 @@ export async function renderTranslatedPage(
   if (!ctx) throw new Error("Canvas desteklenmiyor");
   ctx.drawImage(img, 0, 0, width, height);
 
+  // 1 + 2: yazı + balon algısı API'den geliyor; okuma sırası korunur
   const ordered = [...bubbles].sort((a, b) => a.readingOrder - b.readingOrder);
   let painted = 0;
 
   for (const bubble of ordered) {
     if (!bubble.translated?.trim() || !bubble.box) continue;
 
+    // 2) balon kutusu
     const bubblePx = toPx(resolveBubbleBox(bubble), width, height);
-    const textPx = toPx(bubble.box, width, height);
+    // 1) yazı kutusu — balonun dışına taşmasın
+    const textPx = clipTextInsideBubble(toPx(bubble.box, width, height), bubblePx);
 
-    const { interior, redzone, bounds, fill, mode } = segmentBubbleInterior(
-      ctx,
-      width,
-      height,
-      bubblePx,
-      textPx,
-    );
-    if (!bounds) continue;
+    // 3) balon sınırlarını algıla
+    let seg = detectBubbleBoundary(ctx, width, height, bubblePx, textPx);
+    if (!seg.bounds) continue;
+
+    // 4 + 5: yazı maskelemesi SADECE balon sınırı içinde
+    maskTextInsideBoundary(ctx, width, height, textPx, seg.interior, seg.fill);
+
+    // 6) maskelemeden sonra sınırları tekrar algıla (temiz iç alan)
+    seg = detectBubbleBoundary(ctx, width, height, bubblePx, textPx);
+    if (!seg.bounds) continue;
+
+    // Tüm balon içini şekle uygun doldur
+    fillBubbleInterior(ctx, width, height, seg.interior, seg.bounds, seg.fill);
 
     if (options.showRedzone) {
-      drawDebug(ctx, width, height, bubblePx, textPx, interior, redzone);
+      drawDebug(ctx, width, height, bubblePx, textPx, seg.interior, seg.redzone);
     }
 
-    wipeInteriorMask(ctx, width, height, interior, bounds, fill);
-
-    const placeBox: PxBox = {
-      x: Math.max(bounds.x, textPx.x - textPx.w * 0.05),
-      y: Math.max(bounds.y, textPx.y - textPx.h * 0.05),
-      w: 0,
-      h: 0,
-    };
-    placeBox.w =
-      Math.min(bounds.x + bounds.w, textPx.x + textPx.w * 1.05) - placeBox.x;
-    placeBox.h =
-      Math.min(bounds.y + bounds.h, textPx.y + textPx.h * 1.05) - placeBox.y;
-    if (placeBox.w < 8 || placeBox.h < 8) {
-      placeBox.x = bounds.x;
-      placeBox.y = bounds.y;
-      placeBox.w = bounds.w;
-      placeBox.h = bounds.h;
-    }
-
-    placeComicLettering(
+    // 7) çeviriyi yeniden algılanan sınırların içine yaz
+    writeTranslationInsideBubble(
       ctx,
       bubble.translated,
       bubble.original,
       textPx,
-      placeBox,
-      mode,
+      seg.bounds,
+      seg.mode,
     );
     painted += 1;
   }
 
   if (painted === 0) {
     throw new Error(
-      "Baloncuk şekli algılanamadı. Sayfayı tekrar çevirmeyi dene.",
+      "Baloncuk/yazı zinciri başarısız. Sayfayı tekrar çevirmeyi dene.",
     );
   }
 
