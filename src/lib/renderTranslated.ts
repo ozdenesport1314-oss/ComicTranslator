@@ -333,6 +333,55 @@ function erodeMask(src: Uint8Array, rw: number, rh: number): Uint8Array {
 }
 
 /**
+ * Balon maskesinin içinde kapalı kalan TÜM boşlukları doldurur.
+ * Harflerin siyah gövdeleri maskede delik kalamaz; dış bölgeye bağlı alanlara
+ * dokunulmaz. Bu, nokta/çizgi kalıntısını balon kabuğuna zarar vermeden kapatır.
+ */
+function fillEnclosedHoles(
+  src: Uint8Array,
+  rw: number,
+  rh: number,
+): Uint8Array {
+  const exterior = new Uint8Array(rw * rh);
+  const queue = new Int32Array(rw * rh);
+  let qh = 0;
+  let qt = 0;
+
+  const addExterior = (p: number) => {
+    if (p < 0 || p >= src.length || src[p] || exterior[p]) return;
+    exterior[p] = 1;
+    queue[qt++] = p;
+  };
+
+  // Mask crop'un bütün dış kenarlarından dış bölgeyi flood et.
+  for (let x = 0; x < rw; x += 1) {
+    addExterior(x);
+    addExterior((rh - 1) * rw + x);
+  }
+  for (let y = 0; y < rh; y += 1) {
+    addExterior(y * rw);
+    addExterior(y * rw + rw - 1);
+  }
+
+  while (qh < qt) {
+    const p = queue[qh++];
+    const y = Math.floor(p / rw);
+    const x = p - y * rw;
+    if (x > 0) addExterior(p - 1);
+    if (x + 1 < rw) addExterior(p + 1);
+    if (y > 0) addExterior(p - rw);
+    if (y + 1 < rh) addExterior(p + rw);
+  }
+
+  const out = new Uint8Array(src);
+  for (let p = 0; p < out.length; p += 1) {
+    // Sıfır ama dışarıya bağlı değil = balon içindeki harf/nokta deliği.
+    if (!out[p] && !exterior[p]) out[p] = 1;
+  }
+  return out;
+}
+
+/**
  * PART 3 — Balon algılama + REDZONE kabuğu (kullanıcı diyagramı):
  *
  *   {{{{{  redzone = balon kenarı  }}}}}
@@ -451,6 +500,8 @@ function part3DefineBoundary(
   for (let p = 0; p < rw * rh; p += 1) {
     if (closed[p] && !bubbleGrow[p]) closed[p] = 0;
   }
+  // Harf, nokta ve çizgilerin oluşturduğu kapalı delikleri kesin kapat.
+  closed = fillEnclosedHoles(closed, rw, rh);
 
   let count = 0;
   for (let i = 0; i < closed.length; i += 1) if (closed[i]) count += 1;
@@ -1065,8 +1116,8 @@ function tryUniformBubbleClean(
   const cropArea = rw * rh;
   const coverage = inside / Math.max(1, cropArea);
   const paperRatio = paper / Math.max(1, inside);
-  // Fallback ellipse / artwork bölgesi bu kapıdan geçmez.
-  if (coverage < 0.28 || paperRatio < 0.58) return false;
+  // Fallback ellipse / yoğun artwork bu kapıdan geçmez; taranmış gri balonlar geçer.
+  if (coverage < 0.2 || paperRatio < 0.48) return false;
 
   const img = ctx.getImageData(backupX, backupY, rw, rh);
   for (let y = 0; y < rh; y += 1) {

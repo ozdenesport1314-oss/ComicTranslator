@@ -368,8 +368,8 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              Yalnızca balon temizliği aktif. Görsele hiçbir çeviri veya yeni
-              metin yazılmaz.
+              Yalnızca balon temizliği: kapalı harf/nokta delikleri doldurulur,
+              balon kabuğu redzone ile korunur. Yeni metin yazılmaz.
             </p>
           </div>
 
