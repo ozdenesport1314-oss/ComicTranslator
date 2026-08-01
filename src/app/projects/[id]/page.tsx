@@ -368,8 +368,8 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              Orijinal silinir → Türkçe yazılır. Sınır onarımı artık İngilizceyi
-              geri yapıştırmaz.
+              Redzone = balon kenarı (erken). Silme + yazma kenara değmez.
+              Önce orijinal harf silinir, sonra Türkçe.
             </p>
           </div>
 

@@ -463,52 +463,58 @@ function part3DefineBoundary(
 
   const raw = new Uint8Array(local);
 
-  // Stroke candidates: dark pixels adjacent to interior paper
-  const strokeLocal = new Uint8Array(rw * rh);
-  for (let y = 1; y < rh - 1; y += 1) {
-    for (let x = 1; x < rw - 1; x += 1) {
+  /**
+   * REDZONE = balon DIŞ ÇERÇEVESİ (kenar bandı). Harf mürekkebi DEĞİL.
+   * Eski bug: her koyu piksel (yazı) stroke sanılıp kırmızı oluyordu →
+   * silme yazıya dokunamıyor, İngilizce kalıyordu.
+   *
+   * Doğru: sadece bubble mask'in DIŞ RİMİ → dilate → redzone.
+   */
+  const outerRim = new Uint8Array(rw * rh);
+  for (let y = 0; y < rh; y += 1) {
+    for (let x = 0; x < rw; x += 1) {
       const p = y * rw + x;
-      if (raw[p]) continue;
-      const v = lum[p];
-      const isStroke = mode === "light" ? v < 95 : v > 165;
-      if (!isStroke) continue;
-      let near = false;
-      for (let dy = -2; dy <= 2 && !near; dy += 1) {
-        for (let dx = -2; dx <= 2; dx += 1) {
-          const np = (y + dy) * rw + (x + dx);
-          if (np >= 0 && np < rw * rh && raw[np]) {
-            near = true;
+      if (!raw[p]) continue;
+      let onEdge = x === 0 || y === 0 || x === rw - 1 || y === rh - 1;
+      if (!onEdge) {
+        for (const [dx, dy] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+        ] as const) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= rw || ny >= rh || !raw[ny * rw + nx]) {
+            onEdge = true;
             break;
           }
         }
       }
-      if (near) strokeLocal[p] = 1;
+      if (onEdge) outerRim[p] = 1;
     }
   }
 
-  // PART 7 prep: hafif erode (3px) — 6px küçük balonu öldürüyordu
-  let layer = raw;
-  for (let pass = 0; pass < 3; pass += 1) {
-    const next = new Uint8Array(rw * rh);
+  // Kenar bandını 2px kalınlaştır (balon çizgisi koruma)
+  let redLocal = outerRim;
+  for (let pass = 0; pass < 2; pass += 1) {
+    const next = new Uint8Array(redLocal);
     for (let y = 1; y < rh - 1; y += 1) {
       for (let x = 1; x < rw - 1; x += 1) {
         const p = y * rw + x;
-        if (!layer[p]) continue;
+        if (redLocal[p]) continue;
         if (
-          layer[p - 1] &&
-          layer[p + 1] &&
-          layer[p - rw] &&
-          layer[p + rw] &&
-          layer[p - rw - 1] &&
-          layer[p - rw + 1] &&
-          layer[p + rw - 1] &&
-          layer[p + rw + 1]
+          redLocal[p - 1] ||
+          redLocal[p + 1] ||
+          redLocal[p - rw] ||
+          redLocal[p + rw]
         ) {
-          next[p] = 1;
+          // Rim sadece bubble içinde kalsın
+          if (raw[p]) next[p] = 1;
         }
       }
     }
-    layer = next;
+    redLocal = next;
   }
 
   const interior = new Uint8Array(width * height);
@@ -519,47 +525,35 @@ function part3DefineBoundary(
     for (let x = 0; x < rw; x += 1) {
       const p = y * rw + x;
       const g = (y0 + y) * width + (x0 + x);
-      if (strokeLocal[p]) stroke[g] = 1;
-      if (raw[p] && !layer[p]) redzone[g] = 1;
-      else if (layer[p]) interior[g] = 1;
+      if (redLocal[p]) {
+        redzone[g] = 1;
+        // Stroke = redzone içindeki gerçek koyu çizgi
+        const v = lum[p];
+        if (mode === "light" ? v < 100 : v > 160) stroke[g] = 1;
+      } else if (raw[p]) {
+        // Harfler + kağıt = silinebilir / yazılabilir interior
+        interior[g] = 1;
+      }
     }
   }
 
-  // Interior çok küçüldüyse textBox içi soft zone (harf silme için; dikdörtgen boyama değil)
+  // Flood zayıfsa: textBox soft zone (yine redzone'a değmez)
   let interiorCount = 0;
   for (let i = 0; i < interior.length; i += 1) if (interior[i]) interiorCount += 1;
   const textArea = Math.max(1, textPx.w * textPx.h);
   if (interiorCount < textArea * 0.15) {
     const cx = textPx.x + textPx.w * 0.5;
     const cy = textPx.y + textPx.h * 0.5;
-    const rx = textPx.w * 0.4;
-    const ry = textPx.h * 0.4;
+    const rx = textPx.w * 0.42;
+    const ry = textPx.h * 0.42;
     for (let y = Math.floor(textPx.y); y < textPx.y + textPx.h; y += 1) {
       for (let x = Math.floor(textPx.x); x < textPx.x + textPx.w; x += 1) {
         if (x < 0 || y < 0 || x >= width || y >= height) continue;
         const g = y * width + x;
-        if (stroke[g] || redzone[g]) continue;
+        if (redzone[g]) continue;
         const nx = (x - cx) / rx;
         const ny = (y - cy) / ry;
         if (nx * nx + ny * ny <= 1) interior[g] = 1;
-      }
-    }
-  }
-
-  // Stroke komşuluğu redzone (1px — balon çizgisi koru, yazıyı yutma)
-  const redExpand = new Uint8Array(redzone);
-  for (let y = y0; y < y1; y += 1) {
-    for (let x = x0; x < x1; x += 1) {
-      const g = y * width + x;
-      if (!stroke[g] && !redzone[g]) continue;
-      for (let dy = -1; dy <= 1; dy += 1) {
-        for (let dx = -1; dx <= 1; dx += 1) {
-          const nx = x + dx;
-          const ny = y + dy;
-          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-          redExpand[ny * width + nx] = 1;
-          interior[ny * width + nx] = 0;
-        }
       }
     }
   }
@@ -582,12 +576,11 @@ function part3DefineBoundary(
       ? null
       : { x: x0 + minX, y: y0 + minY, w: maxX - minX + 1, h: maxY - minY + 1 };
 
-  // PART 10 backup: original border strip
   const borderBackup = ctx.getImageData(x0, y0, rw, rh);
 
   return {
     interior,
-    redzone: redExpand,
+    redzone,
     stroke,
     bounds,
     borderBackup,
@@ -1495,13 +1488,75 @@ function drawDebug(
   ctx.restore();
 }
 
-/** Hepsini bağlama */
+/**
+ * Redzone önizleme — ORİJİNAL üzerinde, silme/yazmadan ÖNCE.
+ * Kırmızı = balon kenarı koruma, yeşil = silme+yazma alanı.
+ */
+export async function renderRedzonePreview(
+  imageDataUrl: string,
+  bubbles: BubbleTranslation[],
+): Promise<string> {
+  const img = await loadImage(imageDataUrl);
+  const width = img.naturalWidth || img.width;
+  const height = img.naturalHeight || img.height;
+  if (!width || !height) throw new Error("Görsel boyutları okunamadı");
+
+  const zemin = document.createElement("canvas");
+  zemin.width = width;
+  zemin.height = height;
+  const ctx = zemin.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("Canvas desteklenmiyor");
+  ctx.drawImage(img, 0, 0, width, height);
+
+  const ordered = [...bubbles].sort((a, b) => a.readingOrder - b.readingOrder);
+  for (const bubble of ordered) {
+    if (!bubble.box) continue;
+    const bubblePx = toPx(part1FindBubble(bubble), width, height);
+    const textPx = clipTextInsideBubble(
+      toPx(bubble.box, width, height),
+      bubblePx,
+    );
+    const kind = part2UnderstandTextType(ctx, textPx, width, height);
+    const boundary = part3DefineBoundary(
+      ctx,
+      width,
+      height,
+      bubblePx,
+      textPx,
+      kind,
+    );
+    drawDebug(
+      ctx,
+      width,
+      height,
+      bubblePx,
+      textPx,
+      boundary.interior,
+      boundary.redzone,
+    );
+  }
+  return zemin.toDataURL("image/jpeg", 0.92);
+}
+
+/**
+ * Zincir (sıra zorunlu):
+ * 1) Balon bul
+ * 2) Tür
+ * 3) REDZONE = balon kenarı (erken!) + interior
+ * 4–6) Orijinal harfleri sil (redzone'a değme)
+ * 11) Türkçe yaz (redzone'a değme)
+ */
 export async function renderTranslatedPage(
   imageDataUrl: string,
   bubbles: BubbleTranslation[],
   options: RenderOptions = {},
 ): Promise<string> {
   await ensureComicFont();
+
+  // Debug isteniyorsa silme/yazma yok — sadece erken redzone
+  if (options.showRedzone) {
+    return renderRedzonePreview(imageDataUrl, bubbles);
+  }
 
   const img = await loadImage(imageDataUrl);
   const width = img.naturalWidth || img.width;
@@ -1522,17 +1577,15 @@ export async function renderTranslatedPage(
   for (const bubble of ordered) {
     if (!bubble.translated?.trim() || !bubble.box) continue;
 
-    // PART 1
     const bubblePx = toPx(part1FindBubble(bubble), width, height);
     const textPx = clipTextInsideBubble(
       toPx(bubble.box, width, height),
       bubblePx,
     );
 
-    // PART 2
     const kind = part2UnderstandTextType(ctx, textPx, width, height);
 
-    // PART 3 (+ backup for PART 10)
+    // PART 3 — redzone ÖNCE (balon kenarı)
     const boundary = part3DefineBoundary(
       ctx,
       width,
@@ -1543,30 +1596,16 @@ export async function renderTranslatedPage(
     );
     if (!boundary.bounds) continue;
 
-    // PART 4 → 6 → 7 → 9 → 10 loop
+    // Silme: interior'da orijinal harf, redzone yasak
     const clean = eraseUntilClean(ctx, width, height, textPx, boundary, kind);
-
-    // PART 10 final
     part10RepairBoundaryWithWidth(ctx, boundary, width);
 
-    if (options.showRedzone) {
-      drawDebug(
-        ctx,
-        width,
-        height,
-        bubblePx,
-        textPx,
-        boundary.interior,
-        boundary.redzone,
-      );
-    }
-
-    // PART 11 — yazı silinmeden / İngilizce sızıntısıyla çeviri YOK
     if (!clean || sameLanguageLeak(bubble.original, bubble.translated)) {
       skippedDirty += 1;
       continue;
     }
 
+    // Yazma: yine redzone yasak
     part11WriteTranslation(
       ctx,
       width,
@@ -1580,7 +1619,6 @@ export async function renderTranslatedPage(
       boundary.redzone,
       boundary.stroke,
     );
-    // Çeviriden SONRA part10 YOK — İngilizceyi geri yapıştırır
     painted += 1;
   }
 
@@ -1588,7 +1626,7 @@ export async function renderTranslatedPage(
     const pct = Math.round(CLEAN_THRESHOLD * 100);
     throw new Error(
       skippedDirty > 0
-        ? `Yazı silme %${pct} eşiğini geçemedi (${skippedDirty} balon). Temiz orijinal yükleyip 3 zincir silmeyi tekrar dene.`
+        ? `Yazı silme %${pct} eşiğini geçemedi (${skippedDirty} balon). Temiz orijinal yükleyip tekrar dene.`
         : "Balon/yazı algılanamadı. Temiz orijinal yükleyip tekrar dene.",
     );
   }

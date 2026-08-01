@@ -1,7 +1,11 @@
 import { nanoid } from "nanoid";
 import { expandBox, normalizeBubbleBox } from "./boxes";
 import { compressDataUrl } from "./pdf";
-import { renderTranslatedPage, type RenderOptions } from "./renderTranslated";
+import {
+  renderRedzonePreview,
+  renderTranslatedPage,
+  type RenderOptions,
+} from "./renderTranslated";
 import type { BubbleTranslation } from "./types";
 
 function loadImageSize(src: string): Promise<{ width: number; height: number }> {
@@ -106,7 +110,7 @@ export async function translatePageImage(params: {
 
   const [translatedImageDataUrl, debugImageDataUrl] = await Promise.all([
     renderTranslatedPage(params.imageDataUrl, bubbles, { showRedzone: false }),
-    renderTranslatedPage(params.imageDataUrl, bubbles, { showRedzone: true }),
+    renderRedzonePreview(params.imageDataUrl, bubbles),
   ]);
 
   return { bubbles, translatedImageDataUrl, debugImageDataUrl };
@@ -117,5 +121,8 @@ export async function reapplyBubblesToImage(
   bubbles: BubbleTranslation[],
   options: RenderOptions = {},
 ): Promise<string> {
+  if (options.showRedzone) {
+    return renderRedzonePreview(imageDataUrl, bubbles);
+  }
   return renderTranslatedPage(imageDataUrl, bubbles, options);
 }
