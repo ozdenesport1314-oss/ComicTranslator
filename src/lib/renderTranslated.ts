@@ -1,5 +1,6 @@
+import { findEnclosedBalloon, type TextRect } from "./balloonSegment";
 import { expandBox } from "./boxes";
-import type { BubbleBox, BubbleTranslation } from "./types";
+import type { BubbleBox, BubblePoint, BubbleTranslation } from "./types";
 
 /**
  * Comic erase/render pipeline (BallonsTranslator / manga-image-translator style):
@@ -39,6 +40,8 @@ type Boundary = {
   borderBackup: ImageData;
   backupX: number;
   backupY: number;
+  /** true = kapalı balon bulundu; false = harf-only temizlik (balon yok) */
+  enclosed: boolean;
 };
 
 function loadImage(src: string): Promise<HTMLImageElement> {
@@ -85,9 +88,58 @@ function toPx(box: BubbleBox, width: number, height: number): PxBox {
   };
 }
 
+function polygonToPx(
+  polygon: BubblePoint[] | undefined,
+  width: number,
+  height: number,
+): Array<{ x: number; y: number }> | undefined {
+  if (!polygon || polygon.length < 4) return undefined;
+  return polygon.map((p) => ({ x: p.x * width, y: p.y * height }));
+}
+
+function polygonBounds(polygon: Array<{ x: number; y: number }>): PxBox {
+  const xs = polygon.map((p) => p.x);
+  const ys = polygon.map((p) => p.y);
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  return {
+    x,
+    y,
+    w: Math.max(1, Math.max(...xs) - x),
+    h: Math.max(1, Math.max(...ys) - y),
+  };
+}
+
 /** PART 1 — Balonu bulma */
 function part1FindBubble(bubble: BubbleTranslation): BubbleBox {
   return bubble.bubbleBox ?? expandBox(bubble.box, 0.25);
+}
+
+/**
+ * Balon arama penceresi. Gemini kutusu balonu küçük gösterdiği için flood fill
+ * kutuya çarpıp dikdörtgen üretiyordu. Pencere bilerek geniş: balonun gerçek
+ * kenarı kırpma sınırından ÖNCE bulunsun.
+ */
+function balloonSearchWindow(
+  textPx: PxBox,
+  hintPx: PxBox,
+  width: number,
+  height: number,
+): PxBox {
+  const padX = Math.max(hintPx.w * 0.6, textPx.w * 0.75, 20);
+  const padY = Math.max(hintPx.h * 0.6, textPx.h * 1.0, 20);
+  const left = Math.min(textPx.x, hintPx.x) - padX;
+  const top = Math.min(textPx.y, hintPx.y) - padY;
+  const right = Math.max(textPx.x + textPx.w, hintPx.x + hintPx.w) + padX;
+  const bottom = Math.max(textPx.y + textPx.h, hintPx.y + hintPx.h) + padY;
+  const x = Math.max(0, left);
+  const y = Math.max(0, top);
+  return {
+    x,
+    y,
+    w: Math.max(8, Math.min(width, right) - x),
+    h: Math.max(8, Math.min(height, bottom) - y),
+  };
 }
 
 function clipTextInsideBubble(text: PxBox, bubble: PxBox): PxBox {
@@ -382,6 +434,122 @@ function fillEnclosedHoles(
 }
 
 /**
+ * Balon yok (floating/SFX yazı ya da kağıt panele akıyor). Dikdörtgen ya da
+ * elips uydurmak yerine yalnızca HARF pikselleri temizlenebilir alan olur;
+ * geri kalan her şey dokunulmazdır.
+ */
+function letterOnlyBoundary(
+  ctx: CanvasRenderingContext2D,
+  lum: Float32Array,
+  rw: number,
+  rh: number,
+  x0: number,
+  y0: number,
+  width: number,
+  height: number,
+  text: TextRect,
+  kind: TextKind,
+): Boundary {
+  const ink = new Uint8Array(rw * rh);
+  for (let p = 0; p < rw * rh; p += 1) {
+    if (looksLikeInk(lum, p, rw, rh, kind.mode, kind.cut)) ink[p] = 1;
+  }
+
+  const textW = Math.max(1, text.x1 - text.x0 + 1);
+  const textH = Math.max(1, text.y1 - text.y0 + 1);
+  // Gemini textBox son satırı sık kaçırıyor → komşu satırları da kapsa
+  const gx0 = Math.max(0, text.x0 - Math.round(textW * 0.35 + 12));
+  const gy0 = Math.max(0, text.y0 - Math.round(textH * 0.7 + 12));
+  const gx1 = Math.min(rw - 1, text.x1 + Math.round(textW * 0.35 + 12));
+  const gy1 = Math.min(rh - 1, text.y1 + Math.round(textH * 0.7 + 12));
+
+  const maxCompW = Math.min(rw * 0.8, textW * 1.3 + 26);
+  const maxCompH = Math.min(rh * 0.5, textH * 1.3 + 26);
+  const maxCompArea = Math.max(80, Math.floor(rw * rh * 0.05));
+
+  const keep = new Uint8Array(rw * rh);
+  const seen = new Uint8Array(rw * rh);
+  const stack: number[] = [];
+  for (let start = 0; start < rw * rh; start += 1) {
+    if (!ink[start] || seen[start]) continue;
+    const pixels: number[] = [];
+    let minX = rw;
+    let minY = rh;
+    let maxX = -1;
+    let maxY = -1;
+    seen[start] = 1;
+    stack.push(start);
+    while (stack.length) {
+      const p = stack.pop() as number;
+      pixels.push(p);
+      const y = Math.floor(p / rw);
+      const x = p - y * rw;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          if (!dx && !dy) continue;
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
+          const np = ny * rw + nx;
+          if (!ink[np] || seen[np]) continue;
+          seen[np] = 1;
+          stack.push(np);
+        }
+      }
+    }
+    if (maxX - minX + 1 > maxCompW || maxY - minY + 1 > maxCompH) continue;
+    if (pixels.length > maxCompArea || pixels.length < 2) continue;
+    if (maxX < gx0 || minX > gx1 || maxY < gy0 || minY > gy1) continue;
+    for (const p of pixels) keep[p] = 1;
+  }
+
+  const grown = dilateMask(keep, rw, rh);
+  const interior = new Uint8Array(width * height);
+  let minX = rw;
+  let minY = rh;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < rh; y += 1) {
+    for (let x = 0; x < rw; x += 1) {
+      const p = y * rw + x;
+      if (!grown[p]) continue;
+      // Antialias halkası: açık kağıdı maskeye alma (beyaz leke önlemi)
+      if (!keep[p] && (kind.mode === "light" ? lum[p] > 165 : lum[p] < 95)) {
+        continue;
+      }
+      interior[(y0 + y) * width + (x0 + x)] = 1;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+  }
+
+  return {
+    interior,
+    redzone: new Uint8Array(width * height),
+    stroke: new Uint8Array(width * height),
+    bounds:
+      maxX < 0
+        ? null
+        : {
+            x: x0 + minX,
+            y: y0 + minY,
+            w: maxX - minX + 1,
+            h: maxY - minY + 1,
+          },
+    borderBackup: ctx.getImageData(x0, y0, rw, rh),
+    backupX: x0,
+    backupY: y0,
+    enclosed: false,
+  };
+}
+
+/**
  * PART 3 — Balon algılama + REDZONE kabuğu (kullanıcı diyagramı):
  *
  *   {{{{{  redzone = balon kenarı  }}}}}
@@ -394,14 +562,14 @@ function part3DefineBoundary(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
-  bubblePx: PxBox,
+  searchPx: PxBox,
   textPx: PxBox,
   kind: TextKind,
 ): Boundary {
-  const x0 = Math.max(0, Math.floor(bubblePx.x));
-  const y0 = Math.max(0, Math.floor(bubblePx.y));
-  const x1 = Math.min(width, Math.ceil(bubblePx.x + bubblePx.w));
-  const y1 = Math.min(height, Math.ceil(bubblePx.y + bubblePx.h));
+  const x0 = Math.max(0, Math.floor(searchPx.x));
+  const y0 = Math.max(0, Math.floor(searchPx.y));
+  const x1 = Math.min(width, Math.ceil(searchPx.x + searchPx.w));
+  const y1 = Math.min(height, Math.ceil(searchPx.y + searchPx.h));
   const rw = x1 - x0;
   const rh = y1 - y0;
 
@@ -413,6 +581,7 @@ function part3DefineBoundary(
     borderBackup: ctx.createImageData(1, 1),
     backupX: 0,
     backupY: 0,
+    enclosed: false,
   };
   if (rw < 6 || rh < 6) return empty;
 
@@ -425,68 +594,18 @@ function part3DefineBoundary(
 
   const { mode } = kind;
 
-  // 1) Balon dolgusu adayı (açık balon = parlak, koyu balon = koyu)
-  const fillCand = new Uint8Array(rw * rh);
-  for (let p = 0; p < rw * rh; p += 1) {
-    const v = lum[p];
-    fillCand[p] = mode === "light" ? (v >= 145 ? 1 : 0) : v <= 110 ? 1 : 0;
-  }
+  const text: TextRect = {
+    x0: Math.max(0, Math.min(rw - 1, Math.floor(textPx.x) - x0)),
+    y0: Math.max(0, Math.min(rh - 1, Math.floor(textPx.y) - y0)),
+    x1: Math.max(0, Math.min(rw - 1, Math.ceil(textPx.x + textPx.w) - x0)),
+    y1: Math.max(0, Math.min(rh - 1, Math.ceil(textPx.y + textPx.h) - y0)),
+  };
+  const letterOnly = () =>
+    letterOnlyBoundary(ctx, lum, rw, rh, x0, y0, width, height, text, kind);
 
-  // 2) Text merkezini içeren bağlı bileşeni seç
-  const seedX = Math.min(
-    rw - 2,
-    Math.max(1, Math.floor(textPx.x + textPx.w * 0.5 - x0)),
-  );
-  const seedY = Math.min(
-    rh - 2,
-    Math.max(1, Math.floor(textPx.y + textPx.h * 0.5 - y0)),
-  );
-  let seed = seedY * rw + seedX;
-  if (!fillCand[seed]) {
-    // Yakın parlak/koyu kağıt ara
-    let best = -1;
-    let bestD = 1e9;
-    for (let y = 1; y < rh - 1; y += 1) {
-      for (let x = 1; x < rw - 1; x += 1) {
-        const p = y * rw + x;
-        if (!fillCand[p]) continue;
-        const d = (x - seedX) * (x - seedX) + (y - seedY) * (y - seedY);
-        if (d < bestD) {
-          bestD = d;
-          best = p;
-        }
-      }
-    }
-    seed = best;
-  }
-
-  const bubble = new Uint8Array(rw * rh);
-  if (seed >= 0) {
-    const q = new Int32Array(rw * rh);
-    let qh = 0;
-    let qt = 0;
-    bubble[seed] = 1;
-    q[qt++] = seed;
-    while (qh < qt) {
-      const p = q[qh++];
-      const y = Math.floor(p / rw);
-      const x = p - y * rw;
-      for (const [dx, dy] of [
-        [1, 0],
-        [-1, 0],
-        [0, 1],
-        [0, -1],
-      ] as const) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
-        const np = ny * rw + nx;
-        if (bubble[np] || !fillCand[np]) continue;
-        bubble[np] = 1;
-        q[qt++] = np;
-      }
-    }
-  }
+  // 1–2) Balonu gerçekten ara: kapalı kenar bulunamazsa balon yok kabul edilir.
+  const bubble = findEnclosedBalloon(lum, rw, rh, mode, text);
+  if (!bubble) return letterOnly();
 
   // 3) Morphological CLOSE — harf deliklerini kapat → tam balon gövdesi
   //    {{{{ redzone }}}} içinde *** dolu balon
@@ -505,20 +624,9 @@ function part3DefineBoundary(
 
   let count = 0;
   for (let i = 0; i < closed.length; i += 1) if (closed[i]) count += 1;
-  if (count < 40) {
-    // Son çare: inset bubbleBox elipsi
-    const cx = rw / 2;
-    const cy = rh / 2;
-    const rx = rw * 0.4;
-    const ry = rh * 0.4;
-    for (let y = 0; y < rh; y += 1) {
-      for (let x = 0; x < rw; x += 1) {
-        const nx = (x - cx) / rx;
-        const ny = (y - cy) / ry;
-        if (nx * nx + ny * ny <= 1) closed[y * rw + x] = 1;
-      }
-    }
-  }
+  // Elips/dikdörtgen uydurmak balon hasarı üretiyordu; balon çok küçükse
+  // yalnızca harf temizliğine düş.
+  if (count < 40) return letterOnly();
 
   // 4) REDZONE kabuğu = dış rim (balon çizgisi bandı) — harf değil
   const outerRim = new Uint8Array(rw * rh);
@@ -628,6 +736,7 @@ function part3DefineBoundary(
     borderBackup,
     backupX: x0,
     backupY: y0,
+    enclosed: true,
   };
 }
 
@@ -1083,6 +1192,7 @@ function tryUniformBubbleClean(
   width: number,
   boundary: Boundary,
   kind: TextKind,
+  force = false,
 ): boolean {
   const { borderBackup, backupX, backupY, interior, redzone, stroke } = boundary;
   const rw = borderBackup.width;
@@ -1113,11 +1223,13 @@ function tryUniformBubbleClean(
     }
   }
 
-  const cropArea = rw * rh;
-  const coverage = inside / Math.max(1, cropArea);
-  const paperRatio = paper / Math.max(1, inside);
-  // Fallback ellipse / yoğun artwork bu kapıdan geçmez; taranmış gri balonlar geçer.
-  if (coverage < 0.2 || paperRatio < 0.48) return false;
+  if (!inside) return false;
+  if (!force) {
+    const coverage = inside / Math.max(1, rw * rh);
+    const paperRatio = paper / inside;
+    // Yoğun artwork bu kapıdan geçmez; kağıt ağırlıklı balonlar geçer.
+    if (coverage < 0.2 || paperRatio < 0.48) return false;
+  }
 
   const img = ctx.getImageData(backupX, backupY, rw, rh);
   for (let y = 0; y < rh; y += 1) {
@@ -1152,6 +1264,11 @@ function eraseUntilClean(
 ): boolean {
   const { interior, redzone, stroke, bounds } = boundary;
   if (!bounds) return false;
+
+  // Balon yok: interior zaten yalnızca harf pikselleri → doğrudan kağıt rengi.
+  if (!boundary.enclosed) {
+    return tryUniformBubbleClean(ctx, width, boundary, kind, true);
+  }
 
   // Düşük varyanslı konuşma balonu: exact-shape full interior cleanup.
   if (tryUniformBubbleClean(ctx, width, boundary, kind)) return true;
@@ -1510,6 +1627,7 @@ type PreparedBubble = {
   bubble: BubbleTranslation;
   bubblePx: PxBox;
   textPx: PxBox;
+  searchPx: PxBox;
   kind: TextKind;
   boundary: Boundary;
   clean: boolean;
@@ -1552,7 +1670,11 @@ function groupBubbleInputs(
   bubbles: BubbleTranslation[],
   width: number,
   height: number,
-): Array<{ bubble: BubbleTranslation; bubblePx: PxBox; textPx: PxBox }> {
+): Array<{
+  bubble: BubbleTranslation;
+  bubblePx: PxBox;
+  textPx: PxBox;
+}> {
   const grouped: Array<{
     bubble: BubbleTranslation;
     bubblePx: PxBox;
@@ -1561,8 +1683,16 @@ function groupBubbleInputs(
 
   const ordered = [...bubbles].sort((a, b) => a.readingOrder - b.readingOrder);
   for (const bubble of ordered) {
-    if (!bubble.box || !bubble.translated?.trim()) continue;
-    const bubblePx = toPx(part1FindBubble(bubble), width, height);
+    if (!bubble.box || !bubble.original?.trim()) continue;
+    let bubblePx = toPx(part1FindBubble(bubble), width, height);
+    const bubblePolygonPx = polygonToPx(
+      bubble.bubblePolygon,
+      width,
+      height,
+    );
+    if (bubblePolygonPx) {
+      bubblePx = unionBox(bubblePx, polygonBounds(bubblePolygonPx));
+    }
     const textPx = clipTextInsideBubble(
       toPx(bubble.box, width, height),
       bubblePx,
@@ -1610,11 +1740,17 @@ function prepareAllBubbles(
       width,
       height,
     );
+    const searchPx = balloonSearchWindow(
+      item.textPx,
+      item.bubblePx,
+      width,
+      height,
+    );
     const boundary = part3DefineBoundary(
       originalCtx,
       width,
       height,
-      item.bubblePx,
+      searchPx,
       item.textPx,
       kind,
     );
@@ -1624,6 +1760,7 @@ function prepareAllBubbles(
     if (prepared.some((p) => boxIou(p.textPx, item.textPx) >= 0.82)) continue;
     prepared.push({
       ...item,
+      searchPx,
       kind,
       boundary,
       clean: false,

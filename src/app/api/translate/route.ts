@@ -23,7 +23,34 @@ type BubbleResult = {
   readingOrder: number;
   box: { x: number; y: number; w: number; h: number };
   bubbleBox: { x: number; y: number; w: number; h: number };
+  bubblePolygon?: Array<{ x: number; y: number }>;
+  hasBubble: boolean;
 };
+
+function normalizePolygon(raw: unknown): Array<{ x: number; y: number }> | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const points = raw
+    .map((point) => {
+      if (Array.isArray(point) && point.length >= 2) {
+        const x = Number(point[0]);
+        const y = Number(point[1]);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+        return { x: x > 1 ? x / 1000 : x, y: y > 1 ? y / 1000 : y };
+      }
+      if (!point || typeof point !== "object") return null;
+      const p = point as Record<string, unknown>;
+      const x = Number(p.x);
+      const y = Number(p.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+      return { x: x > 1 ? x / 1000 : x, y: y > 1 ? y / 1000 : y };
+    })
+    .filter((p): p is { x: number; y: number } => p !== null)
+    .map((p) => ({
+      x: Math.max(0, Math.min(1, p.x)),
+      y: Math.max(0, Math.min(1, p.y)),
+    }));
+  return points.length >= 4 ? points : undefined;
+}
 
 function stripCodeFence(text: string): string {
   const trimmed = text.trim();
@@ -66,6 +93,11 @@ function parseBubbles(
           imageWidth,
           imageHeight,
         ) ?? expandBox(textBox, 0.18);
+      const hasBubble =
+        typeof b.hasBubble === "boolean" ? b.hasBubble : true;
+      const bubblePolygon = normalizePolygon(
+        b.bubblePolygon ?? b.balloonPolygon ?? b.contour,
+      );
 
       return {
         original,
@@ -76,9 +108,11 @@ function parseBubbles(
             : index + 1,
         box: textBox,
         bubbleBox,
+        bubblePolygon,
+        hasBubble,
       } satisfies BubbleResult;
     })
-    .filter((b): b is BubbleResult => b !== null)
+    .filter((b): b is NonNullable<typeof b> => b !== null)
     .sort((a, b) => a.readingOrder - b.readingOrder);
 }
 
@@ -175,7 +209,7 @@ export async function POST(request: Request) {
 ZİNCİR:
 1) Önce tüm YAZILARI algıla (her konuşma/düşünce metni)
 2) Her yazı için BALONU algıla
-3) Her balon için SINIRI (bubbleBox) ver
+3) Her balon için SINIRI (bubbleBox + bubblePolygon) ver
 4) Çeviriyi üret
 
 ${sizeHint}
@@ -187,6 +221,8 @@ JSON alanları (zorunlu):
 - readingOrder: okuma sırası (manga: sağdan sola, yukarıdan aşağı)
 - textBox: yazının tam kutusu (0–1000). Çerçeveyi ALMA, yazının tamamını KAPSA.
 - bubbleBox: balonun tamamını saran kutu (0–1000). Yazı bubbleBox'un İÇİNDE olmalı. Komşu paneli yutma.
+- hasBubble: gerçek konuşma/düşünce balonu varsa true; floating/SFX ise false.
+- bubblePolygon: BALONUN DIŞ KONTURUNU saat yönünde izleyen 8–20 nokta [{"x":0–1000,"y":0–1000}]. Metnin kutusu DEĞİL, gerçek balon çizgisi.
 
 Kurallar:
 1) Koordinatlar 0–1000 tam sayı (x,y sol-üst; w,h boyut).
@@ -196,6 +232,8 @@ Kurallar:
 5) translated kısa, vurucu, balona sığar; uzarsa anlamı koruyarak kısalt.
 6) Uydurma balon/yazı yok. Floating yazıysa bubbleBox ≈ textBox + küçük pay.
 7) textBox yazının TÜM satırlarını kapsasın (eksik kutu silmeyi bozar).
+8) hasBubble=true ise bubblePolygon zorunlu ve balon çizgisini çevrelemeli; dikdörtgen köşeleri kopyalama.
+9) hasBubble=false olan floating/SFX metin bu balon-temizleme aşamasında temizlenmeyecek.
 
 SADECE JSON:
 {
@@ -205,7 +243,13 @@ SADECE JSON:
       "translated": "kısa çeviri",
       "readingOrder": 1,
       "textBox": { "x": 140, "y": 100, "w": 200, "h": 120 },
-      "bubbleBox": { "x": 110, "y": 70, "w": 260, "h": 180 }
+      "bubbleBox": { "x": 110, "y": 70, "w": 260, "h": 180 },
+      "hasBubble": true,
+      "bubblePolygon": [
+        { "x": 130, "y": 75 }, { "x": 300, "y": 70 },
+        { "x": 365, "y": 130 }, { "x": 340, "y": 230 },
+        { "x": 180, "y": 245 }, { "x": 110, "y": 160 }
+      ]
     }
   ]
 }

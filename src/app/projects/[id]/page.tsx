@@ -368,8 +368,9 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              Yalnızca balon temizliği: kapalı harf/nokta delikleri doldurulur,
-              balon kabuğu redzone ile korunur. Yeni metin yazılmaz.
+              Yalnızca balon temizliği. Balon, Gemini kutusu yerine kendi kapalı
+              kenarından bulunur; kenar redzone ile korunur. Kapalı balon
+              yoksa sadece harf pikselleri silinir. Yeni metin yazılmaz.
             </p>
           </div>
 

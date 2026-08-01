@@ -55,6 +55,8 @@ export async function translatePageImage(params: {
       box?: unknown;
       textBox?: unknown;
       bubbleBox?: unknown;
+      bubblePolygon?: Array<{ x: number; y: number }>;
+      hasBubble?: boolean;
     }>;
     error?: string;
   };
@@ -99,6 +101,20 @@ export async function translatePageImage(params: {
       readingOrder: bubble.readingOrder,
       box: clipped.w >= 0.01 && clipped.h >= 0.01 ? clipped : box,
       bubbleBox,
+      bubblePolygon: Array.isArray(bubble.bubblePolygon)
+        ? bubble.bubblePolygon
+            .map((p) => ({ x: Number(p.x), y: Number(p.y) }))
+            .filter(
+              (p) =>
+                Number.isFinite(p.x) &&
+                Number.isFinite(p.y) &&
+                p.x >= 0 &&
+                p.x <= 1 &&
+                p.y >= 0 &&
+                p.y <= 1,
+            )
+        : undefined,
+      hasBubble: bubble.hasBubble ?? true,
     });
   }
 

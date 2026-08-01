@@ -6,6 +6,12 @@ export type BubbleBox = {
   h: number;
 };
 
+export type BubblePoint = {
+  /** Normalized 0–1 relative to image width/height */
+  x: number;
+  y: number;
+};
+
 export type BubbleTranslation = {
   id: string;
   original: string;
@@ -15,6 +21,10 @@ export type BubbleTranslation = {
   box: BubbleBox;
   /** Full bubble bounds (optional; falls back to expanded text box) */
   bubbleBox?: BubbleBox;
+  /** Clockwise balloon contour; preferred over rectangular bubbleBox */
+  bubblePolygon?: BubblePoint[];
+  /** False for floating/SFX text that has no balloon */
+  hasBubble?: boolean;
 };
 
 export type ComicPage = {
