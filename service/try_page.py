@@ -43,27 +43,30 @@ print(f"model yüklendi {time.time() - started:.1f}s")
 
 started = time.time()
 raw_mask = cleaner.detect_mask(bgr, threshold=args.threshold, restrict_to_blocks=False)
-mask = cleaner.detect_mask(bgr, threshold=args.threshold, restrict_to_blocks=True)
-blocks = cleaner.detect_blocks(bgr)
+result = cleaner.clean(bgr, threshold=args.threshold)
 print(
-    f"maske {time.time() - started:.1f}s  "
+    f"temizlik {time.time() - started:.1f}s  "
     f"ham={float((raw_mask > 0).mean()):.4f} "
-    f"bloklu={float((mask > 0).mean()):.4f} blok={len(blocks)}"
+    f"maske={result.coverage:.4f} "
+    f"silinen={float((result.erased > 0).mean()):.4f} "
+    f"blok={len(result.blocks)} korunan={len(result.kept)}"
 )
+for block in result.blocks:
+    print(
+        f"  {block.kind:7s} conf={block.confidence:.2f} "
+        f"({block.x0},{block.y0})-({block.x1},{block.y1})"
+    )
 
 overlay = bgr.copy()
 overlay[raw_mask > 0] = (0, 200, 255)
-overlay[mask > 0] = (0, 0, 255)
+overlay[result.erased > 0] = (0, 0, 255)
 overlay = cv2.addWeighted(bgr, 0.45, overlay, 0.55, 0)
-for x0, y0, x1, y1, score in blocks:
-    cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 200, 0), 1)
-
-started = time.time()
-cleaned = cleaner.inpaint(bgr, mask)
-print(f"inpaint {time.time() - started:.1f}s")
+for block in result.blocks:
+    color = (0, 200, 0) if block.kind == "erased" else (255, 0, 255)
+    cv2.rectangle(overlay, (block.x0, block.y0), (block.x1, block.y1), color, 1)
 
 cv2.imwrite(str(out_dir / "input.png"), bgr)
-cv2.imwrite(str(out_dir / "mask.png"), mask)
+cv2.imwrite(str(out_dir / "mask.png"), result.mask)
 cv2.imwrite(str(out_dir / "overlay.png"), overlay)
-cv2.imwrite(str(out_dir / "cleaned.png"), cleaned)
+cv2.imwrite(str(out_dir / "cleaned.png"), result.image)
 print(f"yazildi: {out_dir}")

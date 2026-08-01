@@ -22,7 +22,12 @@ from huggingface_hub import HfApi
 FILES = ("Dockerfile", "requirements.txt", "pipeline.py", "app.py", "download_models.py")
 
 parser = argparse.ArgumentParser()
-parser.add_argument("repo_id", help="kullanici/space-adi")
+parser.add_argument(
+    "repo_id",
+    nargs="?",
+    default="comic-cleanup",
+    help="kullanici/space-adi ya da yalnizca space-adi (kullanici token'dan bulunur)",
+)
 parser.add_argument(
     "--public",
     action="store_true",
@@ -36,14 +41,19 @@ if not token:
 
 here = Path(__file__).parent
 api = HfApi(token=token)
+
+repo_id = args.repo_id
+if "/" not in repo_id:
+    repo_id = f"{api.whoami()['name']}/{repo_id}"
+
 api.create_repo(
-    repo_id=args.repo_id,
+    repo_id=repo_id,
     repo_type="space",
     space_sdk="docker",
     private=not args.public,
     exist_ok=True,
 )
-print(f"space hazir: https://huggingface.co/spaces/{args.repo_id}")
+print(f"space hazir: https://huggingface.co/spaces/{repo_id}")
 
 with tempfile.TemporaryDirectory() as tmp:
     staging = Path(tmp)
@@ -52,10 +62,10 @@ with tempfile.TemporaryDirectory() as tmp:
     shutil.copyfile(here / "space_README.md", staging / "README.md")
     api.upload_folder(
         folder_path=str(staging),
-        repo_id=args.repo_id,
+        repo_id=repo_id,
         repo_type="space",
         commit_message="ComicTranslator temizleme servisi",
     )
 
 print("dosyalar yuklendi; imaj derlemesi basladi")
-print(f"adres: https://{args.repo_id.replace('/', '-').lower()}.hf.space")
+print(f"adres: https://{repo_id.replace('/', '-').lower()}.hf.space")

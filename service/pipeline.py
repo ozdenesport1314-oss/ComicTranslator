@@ -27,11 +27,33 @@ MODELS_DIR = Path(os.environ.get("MODELS_DIR", Path(__file__).parent / "models")
 
 
 @dataclass
+class TextBlock:
+    x0: int
+    y0: int
+    x1: int
+    y1: int
+    confidence: float
+    kind: str = "unknown"
+    """Temizlik sonrası doldurulur: "erased" (yazı silindi, üstüne yazılabilir)
+    veya "kept" (sanat korundu, çeviri bindirilmeli).
+
+    Modelin kendi sınıf çıkışı bu ayrım için kullanılmıyor: gerçek sayfada balon
+    metinleri sınıf 0, sınama sayfasında sınıf 1 verdi — anlamı tutarsız. Karar
+    ölçülebilir olana bağlı: bölge gerçekten silinebildi mi.
+    """
+
+
+@dataclass
 class CleanResult:
     image: np.ndarray
     """Temizlenmiş sayfa (BGR)."""
     mask: np.ndarray
-    """Silinen piksellerin maskesi (0/255)."""
+    """Silinmesi planlanan piksellerin maskesi (0/255)."""
+    erased: np.ndarray
+    """Gerçekten silinen pikseller; korunan bölgeler buraya girmez."""
+    blocks: list[TextBlock]
+    kept: list[tuple[int, int, int, int]]
+    """Sanat hasarı riski nedeniyle dokunulmayan bölgeler."""
     coverage: float
     """Maskenin sayfaya oranı; anormal büyükse bir şey ters gitmiştir."""
 
@@ -145,7 +167,7 @@ class MangaCleaner:
         bgr: np.ndarray,
         conf_threshold: float = 0.2,
         iou_threshold: float = 0.45,
-    ) -> list[tuple[int, int, int, int, float]]:
+    ) -> list[TextBlock]:
         """Yazı bloğu kutuları (orijinal görsel koordinatlarında)."""
         height, width = bgr.shape[:2]
         blk, _, ratio, left, top = self._forward(bgr)
@@ -159,7 +181,7 @@ class MangaCleaner:
         boxes = np.stack(
             [cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2], axis=1
         )
-        result: list[tuple[int, int, int, int, float]] = []
+        result: list[TextBlock] = []
         for index in _nms(boxes, scores, iou_threshold):
             x0, y0, x1, y1 = boxes[index]
             # Letterbox koordinatlarından orijinale dön.
@@ -168,12 +190,12 @@ class MangaCleaner:
             y0 = (y0 - top) / ratio
             y1 = (y1 - top) / ratio
             result.append(
-                (
-                    int(max(0, min(width - 1, round(x0)))),
-                    int(max(0, min(height - 1, round(y0)))),
-                    int(max(0, min(width - 1, round(x1)))),
-                    int(max(0, min(height - 1, round(y1)))),
-                    float(scores[index]),
+                TextBlock(
+                    x0=int(max(0, min(width - 1, round(x0)))),
+                    y0=int(max(0, min(height - 1, round(y0)))),
+                    x1=int(max(0, min(width - 1, round(x1)))),
+                    y1=int(max(0, min(height - 1, round(y1)))),
+                    confidence=float(scores[index]),
                 )
             )
         return result
@@ -205,11 +227,11 @@ class MangaCleaner:
             blocks = self.detect_blocks(bgr, conf_threshold=block_conf)
             if blocks:
                 allowed = np.zeros((height, width), dtype=np.uint8)
-                for x0, y0, x1, y1, _ in blocks:
-                    ax0 = max(0, x0 - block_pad)
-                    ay0 = max(0, y0 - block_pad)
-                    ax1 = min(width - 1, x1 + block_pad)
-                    ay1 = min(height - 1, y1 + block_pad)
+                for block in blocks:
+                    ax0 = max(0, block.x0 - block_pad)
+                    ay0 = max(0, block.y0 - block_pad)
+                    ax1 = min(width - 1, block.x1 + block_pad)
+                    ay1 = min(height - 1, block.y1 + block_pad)
                     allowed[ay0 : ay1 + 1, ax0 : ax1 + 1] = 255
                 mask = cv2.bitwise_and(mask, allowed)
         # Tek piksellik parazit maskeye girerse inpaint boşuna çalışır.
@@ -222,9 +244,164 @@ class MangaCleaner:
             mask = cv2.dilate(mask, kernel, iterations=grow)
         return mask
 
-    def inpaint(self, bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    def _lama(self, crop: np.ndarray, crop_mask: np.ndarray) -> np.ndarray:
+        """Kırpmayı 512'ye ölçekleyip LaMa ile doldurur, orijinal boyutta döner."""
+        h, w = crop.shape[:2]
+        small = cv2.resize(crop, (LAMA_SIZE, LAMA_SIZE), interpolation=cv2.INTER_AREA)
+        small_mask = cv2.resize(
+            crop_mask, (LAMA_SIZE, LAMA_SIZE), interpolation=cv2.INTER_NEAREST
+        )
+        rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        m = (small_mask > 0).astype(np.float32)
+        # LaMa maskelenmiş bölgeyi boş görmek üzere eğitildi.
+        rgb = rgb * (1.0 - m[:, :, None])
+        result = self.inpainter.run(
+            ["output"],
+            {"image": rgb.transpose(2, 0, 1)[None], "mask": m[None, None]},
+        )[0][0]
+        filled = result.transpose(1, 2, 0)
+        if filled.max() <= 1.5:
+            filled = filled * 255.0
+        filled = np.clip(filled, 0, 255).astype(np.uint8)
+        filled = cv2.cvtColor(filled, cv2.COLOR_RGB2BGR)
+        return cv2.resize(filled, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    def _fill_region(
+        self,
+        source: np.ndarray,
+        out: np.ndarray,
+        mask: np.ndarray,
+        box: tuple[int, int, int, int],
+        erased: np.ndarray,
+        kept: list[tuple[int, int, int, int]],
+        allow_model: bool = True,
+        depth: int = 0,
+    ) -> None:
+        height, width = source.shape[:2]
+        x0, y0, x1, y1 = box
+        bw = x1 - x0 + 1
+        bh = y1 - y0 + 1
+
+        # Bağlam KARE alınır: 600x140 gibi bir SFX kutusunu doğrudan 512x512'ye
+        # ölçeklemek görüntüyü eziyor ve model bağlamı kaybediyordu.
+        side = int(max(bw, bh) * 2.4)
+        side = max(side, 96)
+        side = min(side, min(width, height))
+        cx = (x0 + x1) // 2
+        cy = (y0 + y1) // 2
+        sx0 = min(max(0, cx - side // 2), max(0, width - side))
+        sy0 = min(max(0, cy - side // 2), max(0, height - side))
+        sx1 = min(width, sx0 + side)
+        sy1 = min(height, sy0 + side)
+
+        crop = source[sy0:sy1, sx0:sx1]
+        crop_mask = mask[sy0:sy1, sx0:sx1]
+        if crop.size == 0 or not crop_mask.any():
+            return
+
+        # Maske kırpmanın büyük kısmını kaplıyorsa modele bakacak yer kalmıyor;
+        # bölgeyi ikiye ayırıp her parçaya kendi bağlamını ver.
+        occupancy = float((crop_mask > 0).mean())
+        if occupancy > 0.30 and depth < 3 and max(bw, bh) > 48:
+            if bw >= bh:
+                middle = (x0 + x1) // 2
+                left_half = (x0, y0, middle, y1)
+                right_half = (middle + 1, y0, x1, y1)
+            else:
+                middle = (y0 + y1) // 2
+                left_half = (x0, y0, x1, middle)
+                right_half = (x0, middle + 1, x1, y1)
+            for half in (left_half, right_half):
+                self._fill_region(
+                    source, out, mask, half, erased, kept, allow_model, depth + 1
+                )
+            return
+
+        # Yalnızca bu bölgenin maskesini doldur; komşu bölgeler kendi sırasında
+        # işlenir, yoksa aynı pikseller birden çok kez yazılıyor.
+        local = np.zeros_like(crop_mask)
+        local[y0 - sy0 : y1 - sy0 + 1, x0 - sx0 : x1 - sx0 + 1] = crop_mask[
+            y0 - sy0 : y1 - sy0 + 1, x0 - sx0 : x1 - sx0 + 1
+        ]
+        if not local.any():
+            return
+
+        selected = local > 0
+        flat = self._flat_fill(crop, local, crop_mask)
+        if flat is not None:
+            filled = flat
+        else:
+            # Dokulu zeminde büyük bir alanı yeniden kurmak hiçbir modelde
+            # inandırıcı olmuyor: SFX yazısını silmeye çalışmak sanatı bozuyor.
+            # Böyle bölgeler olduğu gibi bırakılır, çeviri üstüne bindirilir.
+            if not allow_model or max(bw, bh) > 0.45 * min(width, height):
+                kept.append((x0, y0, x1, y1))
+                return
+            filled = self._lama(crop, local)
+            if not self._fill_is_sane(crop, local, filled):
+                kept.append((x0, y0, x1, y1))
+                return
+
+        region = out[sy0:sy1, sx0:sx1]
+        region[selected] = filled[selected]
+        erased[sy0:sy1, sx0:sx1][selected] = 255
+
+    @staticmethod
+    def _flat_fill(
+        crop: np.ndarray, local: np.ndarray, all_mask: np.ndarray
+    ) -> np.ndarray | None:
+        """Çevresi düz bir zeminse (balon içi) medyan renkle doldurur.
+
+        Balon içi için LaMa gereksiz; üstelik bazen leke bırakıyor. Halka
+        ölçülürken komşu harfler dışlanır: aksi halde yoğun yazıda halkaya
+        düşen harf pikselleri zemini "dokulu" gösterip düz dolguyu engelliyor
+        ve balon metni bile temizlenmeden kalıyordu.
+        """
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        ring = cv2.subtract(cv2.dilate(local, kernel, iterations=2), local)
+        ring[all_mask > 0] = 0
+        pixels = crop[ring > 0].reshape(-1, crop.shape[-1])
+        if pixels.shape[0] < 60:
+            return None
+        median = np.median(pixels, axis=0)
+        # Ortalama yerine medyan çevresi: tek tük aykırı piksel kararı bozmasın.
+        inliers = float(
+            (np.abs(pixels.astype(np.float32) - median).max(axis=1) <= 25).mean()
+        )
+        if inliers < 0.75:
+            return None
+        return np.full_like(crop, median.astype(np.uint8))
+
+    @staticmethod
+    def _fill_is_sane(
+        crop: np.ndarray, mask: np.ndarray, filled: np.ndarray
+    ) -> bool:
+        """Dolgunun çevresiyle uyumlu olup olmadığına bakar.
+
+        Model bazen açık zemine koyu leke basıyor. Böyle bir sonucu yazmak
+        orijinal metni bırakmaktan daha kötü.
+        """
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        ring = cv2.subtract(cv2.dilate(mask, kernel, iterations=2), mask)
+        around = crop[ring > 0]
+        inside = filled[mask > 0]
+        if around.size < 60 or inside.size == 0:
+            return True
+        return abs(float(around.mean()) - float(inside.mean())) <= 55.0
+
+    def inpaint(
+        self,
+        bgr: np.ndarray,
+        mask: np.ndarray,
+        erased: np.ndarray | None = None,
+        kept: list[tuple[int, int, int, int]] | None = None,
+    ) -> np.ndarray:
         height, width = bgr.shape[:2]
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        if erased is None:
+            erased = np.zeros((height, width), dtype=np.uint8)
+        if kept is None:
+            kept = []
+        count, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
         raw: list[tuple[int, int, int, int]] = []
         for label in range(1, count):
             x = stats[label, cv2.CC_STAT_LEFT]
@@ -235,45 +412,10 @@ class MangaCleaner:
         if not raw:
             return bgr.copy()
 
-        gap = max(12, int(min(width, height) * 0.02))
+        gap = max(8, int(min(width, height) * 0.012))
         out = bgr.copy()
-        for x0, y0, x1, y1 in _merge_boxes(raw, gap):
-            pad = max(24, int(0.3 * max(x1 - x0 + 1, y1 - y0 + 1)))
-            cx0 = max(0, x0 - pad)
-            cy0 = max(0, y0 - pad)
-            cx1 = min(width, x1 + pad + 1)
-            cy1 = min(height, y1 + pad + 1)
-            crop = bgr[cy0:cy1, cx0:cx1]
-            crop_mask = mask[cy0:cy1, cx0:cx1]
-            if crop.size == 0 or not crop_mask.any():
-                continue
-
-            small = cv2.resize(
-                crop, (LAMA_SIZE, LAMA_SIZE), interpolation=cv2.INTER_AREA
-            )
-            small_mask = cv2.resize(
-                crop_mask, (LAMA_SIZE, LAMA_SIZE), interpolation=cv2.INTER_NEAREST
-            )
-            rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            m = (small_mask > 0).astype(np.float32)
-            # LaMa maskelenmiş bölgeyi boş görmek üzere eğitildi.
-            rgb = rgb * (1.0 - m[:, :, None])
-            image_t = rgb.transpose(2, 0, 1)[None]
-            mask_t = m[None, None]
-            result = self.inpainter.run(
-                ["output"], {"image": image_t, "mask": mask_t}
-            )[0][0]
-            filled = result.transpose(1, 2, 0)
-            if filled.max() <= 1.5:
-                filled = filled * 255.0
-            filled = np.clip(filled, 0, 255).astype(np.uint8)
-            filled = cv2.cvtColor(filled, cv2.COLOR_RGB2BGR)
-            filled = cv2.resize(
-                filled, (cx1 - cx0, cy1 - cy0), interpolation=cv2.INTER_LINEAR
-            )
-            region = out[cy0:cy1, cx0:cx1]
-            selected = crop_mask > 0
-            region[selected] = filled[selected]
+        for box in _merge_boxes(raw, gap):
+            self._fill_region(bgr, out, mask, box, erased, kept)
         return out
 
     def clean(
@@ -289,6 +431,20 @@ class MangaCleaner:
             grow=grow,
             restrict_to_blocks=restrict_to_blocks,
         )
-        coverage = float((mask > 0).mean())
-        image = self.inpaint(bgr, mask)
-        return CleanResult(image=image, mask=mask, coverage=coverage)
+        erased = np.zeros(bgr.shape[:2], dtype=np.uint8)
+        kept: list[tuple[int, int, int, int]] = []
+        image = self.inpaint(bgr, mask, erased, kept)
+
+        blocks = self.detect_blocks(bgr)
+        for block in blocks:
+            window = erased[block.y0 : block.y1 + 1, block.x0 : block.x1 + 1]
+            block.kind = "erased" if window.any() else "kept"
+
+        return CleanResult(
+            image=image,
+            mask=mask,
+            erased=erased,
+            blocks=blocks,
+            kept=kept,
+            coverage=float((mask > 0).mean()),
+        )

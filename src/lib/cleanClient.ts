@@ -6,10 +6,23 @@
  * üzerinde eğitilmiş bir modelden gelir, boşluk inpaint ile doldurulur.
  */
 
+export type ServiceTextBlock = {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  confidence: number;
+  /** "erased": yazı silindi, üstüne çeviri yazılabilir.
+   *  "kept": sanat korundu (dokulu zeminde SFX), çeviri bindirilmeli. */
+  kind: "erased" | "kept";
+};
+
 export type ServiceCleanResult = {
   imageDataUrl: string;
   coverage: number;
-  blocks: number;
+  blocks: ServiceTextBlock[];
+  /** Sanat hasarı riski nedeniyle dokunulmayan bölgeler */
+  kept: Array<[number, number, number, number]>;
   ms: number;
 };
 
@@ -24,7 +37,8 @@ export async function cleanPageWithService(
   const data = (await response.json()) as {
     imageBase64?: string;
     coverage?: number;
-    blocks?: number;
+    blocks?: ServiceTextBlock[];
+    kept?: Array<[number, number, number, number]>;
     ms?: number;
     error?: string;
   };
@@ -34,7 +48,8 @@ export async function cleanPageWithService(
   return {
     imageDataUrl: data.imageBase64,
     coverage: data.coverage ?? 0,
-    blocks: data.blocks ?? 0,
+    blocks: data.blocks ?? [],
+    kept: data.kept ?? [],
     ms: data.ms ?? 0,
   };
 }

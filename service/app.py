@@ -54,11 +54,23 @@ class CleanRequest(BaseModel):
     returnMask: bool = False
 
 
+class BlockOut(BaseModel):
+    x0: int
+    y0: int
+    x1: int
+    y1: int
+    confidence: float
+    kind: str
+    """"erased" = yazı silindi, üstüne çeviri yazılabilir.
+    "kept" = sanat korundu (dokulu zeminde SFX), çeviri bindirilmeli."""
+
+
 class CleanResponse(BaseModel):
     imageBase64: str
     maskBase64: str | None = None
     coverage: float
-    blocks: int
+    blocks: list[BlockOut]
+    kept: list[list[int]]
     ms: int
 
 
@@ -94,18 +106,27 @@ def clean(request: Annotated[CleanRequest, Body()]) -> CleanResponse:
         raise HTTPException(503, "model yüklenmedi")
     started = time.time()
     bgr = _decode(request.imageBase64)
-    mask = cleaner.detect_mask(
+    result = cleaner.clean(
         bgr,
         threshold=request.threshold,
         grow=request.grow,
         restrict_to_blocks=request.restrictToBlocks,
     )
-    blocks = cleaner.detect_blocks(bgr)
-    cleaned = cleaner.inpaint(bgr, mask)
     return CleanResponse(
-        imageBase64=_encode(cleaned),
-        maskBase64=_encode(mask, ".png") if request.returnMask else None,
-        coverage=float((mask > 0).mean()),
-        blocks=len(blocks),
+        imageBase64=_encode(result.image),
+        maskBase64=_encode(result.mask, ".png") if request.returnMask else None,
+        coverage=result.coverage,
+        blocks=[
+            BlockOut(
+                x0=b.x0,
+                y0=b.y0,
+                x1=b.x1,
+                y1=b.y1,
+                confidence=round(b.confidence, 3),
+                kind=b.kind,
+            )
+            for b in result.blocks
+        ],
+        kept=[list(box) for box in result.kept],
         ms=int((time.time() - started) * 1000),
     )
