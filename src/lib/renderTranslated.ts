@@ -291,19 +291,46 @@ function detectBubbleBoundary(
     }
   }
 
+  const raw = new Uint8Array(rw * rh);
+  for (let i = 0; i < local.length; i += 1) raw[i] = local[i];
+
+  // Strong border redzone: erode 3px from outline so mask NEVER touches balloon line
+  let layer = raw;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = new Uint8Array(rw * rh);
+    for (let y = 1; y < rh - 1; y += 1) {
+      for (let x = 1; x < rw - 1; x += 1) {
+        const p = y * rw + x;
+        if (!layer[p]) continue;
+        if (
+          layer[p - 1] &&
+          layer[p + 1] &&
+          layer[p - rw] &&
+          layer[p + rw] &&
+          layer[p - rw - 1] &&
+          layer[p - rw + 1] &&
+          layer[p + rw - 1] &&
+          layer[p + rw + 1]
+        ) {
+          next[p] = 1;
+        }
+      }
+    }
+    layer = next;
+  }
+
   const interior = new Uint8Array(width * height);
   const redzone = new Uint8Array(width * height);
 
-  // Erode 1px — mask stays strictly inside border
-  for (let y = 1; y < rh - 1; y += 1) {
-    for (let x = 1; x < rw - 1; x += 1) {
+  for (let y = 0; y < rh; y += 1) {
+    for (let x = 0; x < rw; x += 1) {
       const p = y * rw + x;
-      if (!local[p]) continue;
-      if (!(local[p - 1] && local[p + 1] && local[p - rw] && local[p + rw])) {
-        redzone[(y0 + y) * width + (x0 + x)] = 1;
-        continue;
+      const g = (y0 + y) * width + (x0 + x);
+      if (raw[p] && !layer[p]) {
+        redzone[g] = 1; // forbidden band near balloon stroke
+      } else if (layer[p]) {
+        interior[g] = 1; // safe mask zone only
       }
-      interior[(y0 + y) * width + (x0 + x)] = 1;
     }
   }
 
@@ -311,56 +338,84 @@ function detectBubbleBoundary(
   return { interior, redzone, bounds, fill, mode };
 }
 
-/**
- * STEP: yazıları harf harf maskele (a b c → * * *)
- * - Sadece mürekkep / harf bileşenlerini siler
- * - Tüm balonu beyaza BOYAMAZ
- * - Balon sınırı (interior) dışına ASLA çıkmaz
- */
-function maskLettersInsideBoundary(
-  ctx: CanvasRenderingContext2D,
+function isSafeMaskPixel(
+  gx: number,
+  gy: number,
   width: number,
   height: number,
-  textPx: PxBox,
   interior: Uint8Array,
-  mode: "light" | "dark",
-  fill: Rgb,
-) {
-  // Tight text region — small pad only for glyph edges, not whole bubble
-  const pad = Math.max(2, Math.min(textPx.w, textPx.h) * 0.03);
-  const x0 = Math.max(0, Math.floor(textPx.x - pad));
-  const y0 = Math.max(0, Math.floor(textPx.y - pad));
-  const x1 = Math.min(width, Math.ceil(textPx.x + textPx.w + pad));
-  const y1 = Math.min(height, Math.ceil(textPx.y + textPx.h + pad));
-  const rw = x1 - x0;
-  const rh = y1 - y0;
-  if (rw < 2 || rh < 2) return;
-
-  const img = ctx.getImageData(x0, y0, rw, rh);
-  const { data } = img;
-  const n = rw * rh;
-  const lum = new Float32Array(n);
-  for (let p = 0, i = 0; p < n; p += 1, i += 4) {
-    lum[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  redzone: Uint8Array,
+): boolean {
+  if (gx < 0 || gy < 0 || gx >= width || gy >= height) return false;
+  const g = gy * width + gx;
+  if (!interior[g] || redzone[g]) return false;
+  // Extra guard: neighbors must not be redzone (mask never kisses the line)
+  for (let dy = -1; dy <= 1; dy += 1) {
+    for (let dx = -1; dx <= 1; dx += 1) {
+      const nx = gx + dx;
+      const ny = gy + dy;
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) return false;
+      if (redzone[ny * width + nx]) return false;
+    }
   }
+  return true;
+}
 
-  // Ink vs paper depending on bubble type
-  const ink = new Uint8Array(n);
-  for (let p = 0; p < n; p += 1) {
+/**
+ * Collect letter-like ink blobs (***** detector).
+ * Sensitive enough for thin Hangul + bold Latin.
+ */
+function detectLetterPatches(
+  lum: Float32Array,
+  rw: number,
+  rh: number,
+  x0: number,
+  y0: number,
+  width: number,
+  height: number,
+  interior: Uint8Array,
+  redzone: Uint8Array,
+  mode: "light" | "dark",
+  sensitive: boolean,
+): number[][] {
+  // Adaptive paper from bright/dark end
+  const vals: number[] = [];
+  for (let p = 0; p < lum.length; p += 1) {
     const gx = x0 + (p % rw);
     const gy = y0 + Math.floor(p / rw);
-    if (!interior[gy * width + gx]) continue; // bubble boundary clamp
-    const isInk = mode === "light" ? lum[p] < 175 : lum[p] > 70;
+    if (!isSafeMaskPixel(gx, gy, width, height, interior, redzone)) continue;
+    vals.push(lum[p]);
+  }
+  vals.sort((a, b) => a - b);
+  const paper =
+    mode === "light"
+      ? vals[Math.floor(vals.length * 0.85)] ?? 245
+      : vals[Math.floor(vals.length * 0.15)] ?? 20;
+
+  const inkCut = sensitive
+    ? mode === "light"
+      ? Math.min(210, paper - 18)
+      : Math.max(35, paper + 18)
+    : mode === "light"
+      ? Math.min(190, paper - 28)
+      : Math.max(50, paper + 28);
+
+  const ink = new Uint8Array(rw * rh);
+  for (let p = 0; p < rw * rh; p += 1) {
+    const gx = x0 + (p % rw);
+    const gy = y0 + Math.floor(p / rw);
+    if (!isSafeMaskPixel(gx, gy, width, height, interior, redzone)) continue;
+    const isInk = mode === "light" ? lum[p] < inkCut : lum[p] > inkCut;
     if (isInk) ink[p] = 1;
   }
 
-  // Connected components = individual letters/glyphs
-  const labels = new Int32Array(n).fill(-1);
-  let label = 0;
-  const stack: number[] = [];
+  const labels = new Int32Array(rw * rh).fill(-1);
   const components: number[][] = [];
+  const stack: number[] = [];
+  let label = 0;
+  const minSize = sensitive ? 3 : 5;
 
-  for (let start = 0; start < n; start += 1) {
+  for (let start = 0; start < rw * rh; start += 1) {
     if (!ink[start] || labels[start] >= 0) continue;
     const pixels: number[] = [];
     labels[start] = label;
@@ -370,33 +425,40 @@ function maskLettersInsideBoundary(
       pixels.push(p);
       const y = Math.floor(p / rw);
       const x = p - y * rw;
-      for (const [dx, dy] of [
-        [1, 0],
-        [-1, 0],
-        [0, 1],
-        [0, -1],
-        [1, 1],
-        [1, -1],
-        [-1, 1],
-        [-1, -1],
-      ] as const) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
-        const np = ny * rw + nx;
-        if (!ink[np] || labels[np] >= 0) continue;
-        labels[np] = label;
-        stack.push(np);
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          if (!dx && !dy) continue;
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
+          const np = ny * rw + nx;
+          if (!ink[np] || labels[np] >= 0) continue;
+          labels[np] = label;
+          stack.push(np);
+        }
       }
     }
-    // Drop tiny noise speckles; keep real letter blobs
-    if (pixels.length >= 6) components.push(pixels);
+    if (pixels.length >= minSize) components.push(pixels);
     label += 1;
   }
+  return components;
+}
 
-  // Dilate each letter slightly, then paint only those pixels with paper color
-  const dilate = 1;
-  const wipe = new Uint8Array(n);
+function applyLetterPatches(
+  data: Uint8ClampedArray,
+  components: number[][],
+  rw: number,
+  rh: number,
+  x0: number,
+  y0: number,
+  width: number,
+  height: number,
+  interior: Uint8Array,
+  redzone: Uint8Array,
+  fill: Rgb,
+  dilate: number,
+) {
+  const wipe = new Uint8Array(rw * rh);
   for (const pixels of components) {
     for (const p of pixels) {
       const y = Math.floor(p / rw);
@@ -408,20 +470,124 @@ function maskLettersInsideBoundary(
           if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
           const gx = x0 + nx;
           const gy = y0 + ny;
-          if (!interior[gy * width + gx]) continue;
+          if (!isSafeMaskPixel(gx, gy, width, height, interior, redzone)) continue;
           wipe[ny * rw + nx] = 1;
         }
       }
     }
   }
 
-  for (let p = 0; p < n; p += 1) {
+  let wiped = 0;
+  for (let p = 0; p < wipe.length; p += 1) {
     if (!wipe[p]) continue;
     const i = p * 4;
     data[i] = fill.r;
     data[i + 1] = fill.g;
     data[i + 2] = fill.b;
     data[i + 3] = 255;
+    wiped += 1;
+  }
+  return wiped;
+}
+
+/**
+ * STEP: harf harf maskele (***** ) + denetleyici
+ * - Maske = redzone dışı safe zone
+ * - Balon çizgisine ASLA değmez
+ * - İlk geçişten sonra hassas denetleyici kalan yazıyı tekrar yamar
+ */
+function maskLettersInsideBoundary(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  textPx: PxBox,
+  interior: Uint8Array,
+  redzone: Uint8Array,
+  mode: "light" | "dark",
+  fill: Rgb,
+) {
+  const pad = Math.max(2, Math.min(textPx.w, textPx.h) * 0.04);
+  const x0 = Math.max(0, Math.floor(textPx.x - pad));
+  const y0 = Math.max(0, Math.floor(textPx.y - pad));
+  const x1 = Math.min(width, Math.ceil(textPx.x + textPx.w + pad));
+  const y1 = Math.min(height, Math.ceil(textPx.y + textPx.h + pad));
+  const rw = x1 - x0;
+  const rh = y1 - y0;
+  if (rw < 2 || rh < 2) return;
+
+  const img = ctx.getImageData(x0, y0, rw, rh);
+  const { data } = img;
+
+  const readLum = () => {
+    const lum = new Float32Array(rw * rh);
+    for (let p = 0, i = 0; p < rw * rh; p += 1, i += 4) {
+      lum[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    }
+    return lum;
+  };
+
+  // Pass 1: normal ***** letter patches
+  let lum = readLum();
+  let comps = detectLetterPatches(
+    lum,
+    rw,
+    rh,
+    x0,
+    y0,
+    width,
+    height,
+    interior,
+    redzone,
+    mode,
+    false,
+  );
+  applyLetterPatches(
+    data,
+    comps,
+    rw,
+    rh,
+    x0,
+    y0,
+    width,
+    height,
+    interior,
+    redzone,
+    fill,
+    2,
+  );
+
+  // Pass 2+3: supervisor — hassas kalan-yazı dedektörü
+  for (let round = 0; round < 3; round += 1) {
+    lum = readLum();
+    comps = detectLetterPatches(
+      lum,
+      rw,
+      rh,
+      x0,
+      y0,
+      width,
+      height,
+      interior,
+      redzone,
+      mode,
+      true,
+    );
+    if (!comps.length) break;
+    const wiped = applyLetterPatches(
+      data,
+      comps,
+      rw,
+      rh,
+      x0,
+      y0,
+      width,
+      height,
+      interior,
+      redzone,
+      fill,
+      2,
+    );
+    if (wiped < 8) break;
   }
 
   ctx.putImageData(img, x0, y0);
@@ -621,13 +787,14 @@ export async function renderTranslatedPage(
     let seg = detectBubbleBoundary(ctx, width, height, bubblePx, textPx);
     if (!seg.bounds) continue;
 
-    // 4) harf harf maskele — tüm balonu boyama
+    // 4) harf harf maskele + denetleyici — balon çizgisine (redzone) ASLA değme
     maskLettersInsideBoundary(
       ctx,
       width,
       height,
       textPx,
       seg.interior,
+      seg.redzone,
       seg.mode,
       seg.fill,
     );
