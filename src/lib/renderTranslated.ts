@@ -361,10 +361,76 @@ function isSafeMaskPixel(
   return true;
 }
 
-/**
- * Collect true letter ink blobs only (abcde → *****).
- * Rejects giant fill-like regions that would become white rectangles.
- */
+function readRegionLum(data: Uint8ClampedArray, n: number): Float32Array {
+  const lum = new Float32Array(n);
+  for (let p = 0, i = 0; p < n; p += 1, i += 4) {
+    lum[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  }
+  return lum;
+}
+
+function inkThreshold(
+  lum: Float32Array,
+  rw: number,
+  rh: number,
+  x0: number,
+  y0: number,
+  width: number,
+  height: number,
+  interior: Uint8Array,
+  redzone: Uint8Array,
+  mode: "light" | "dark",
+  sensitive: boolean,
+): number {
+  const vals: number[] = [];
+  for (let p = 0; p < lum.length; p += 1) {
+    const gx = x0 + (p % rw);
+    const gy = y0 + Math.floor(p / rw);
+    if (!isSafeMaskPixel(gx, gy, width, height, interior, redzone)) continue;
+    vals.push(lum[p]);
+  }
+  if (!vals.length) return mode === "light" ? 120 : 140;
+  vals.sort((a, b) => a - b);
+  const darkRef = vals[Math.floor(vals.length * 0.1)] ?? 35;
+  const paperRef = vals[Math.floor(vals.length * 0.9)] ?? 245;
+  if (mode === "light") {
+    // Strict: only real dark ink, never mid paper (prevents white rectangles)
+    return Math.min(sensitive ? 135 : 120, Math.max(85, darkRef + (sensitive ? 45 : 30)));
+  }
+  return Math.max(sensitive ? 100 : 120, Math.min(190, paperRef - 50));
+}
+
+function isBorderStrokePixel(
+  lum: Float32Array,
+  p: number,
+  rw: number,
+  x0: number,
+  y0: number,
+  width: number,
+  height: number,
+  redzone: Uint8Array,
+  mode: "light" | "dark",
+): boolean {
+  const y = Math.floor(p / rw);
+  const x = p - y * rw;
+  const gx = x0 + x;
+  const gy = y0 + y;
+  if (redzone[gy * width + gx]) return true;
+  const v = lum[p];
+  const dark = mode === "light" ? v < 85 : v > 170;
+  if (!dark) return false;
+  for (let dy = -2; dy <= 2; dy += 1) {
+    for (let dx = -2; dx <= 2; dx += 1) {
+      const nx = gx + dx;
+      const ny = gy + dy;
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) return true;
+      if (redzone[ny * width + nx]) return true;
+    }
+  }
+  return false;
+}
+
+/** ***** detector: letter ink components only */
 function detectLetterPatches(
   lum: Float32Array,
   rw: number,
@@ -378,33 +444,28 @@ function detectLetterPatches(
   mode: "light" | "dark",
   sensitive: boolean,
 ): number[][] {
-  const vals: number[] = [];
-  for (let p = 0; p < lum.length; p += 1) {
-    const gx = x0 + (p % rw);
-    const gy = y0 + Math.floor(p / rw);
-    if (!isSafeMaskPixel(gx, gy, width, height, interior, redzone)) continue;
-    vals.push(lum[p]);
-  }
-  if (!vals.length) return [];
-  vals.sort((a, b) => a - b);
-
-  // Use DARK peak for letters — never treat mid-gray paper as ink
-  const darkRef = vals[Math.floor(vals.length * 0.12)] ?? 40;
-  const paperRef = vals[Math.floor(vals.length * 0.9)] ?? 245;
-  const inkCut =
-    mode === "light"
-      ? Math.min(
-          sensitive ? 155 : 140,
-          Math.max(95, darkRef + (sensitive ? 55 : 40)),
-        )
-      : Math.max(sensitive ? 90 : 110, Math.min(200, paperRef - 40));
-
+  const cut = inkThreshold(
+    lum,
+    rw,
+    rh,
+    x0,
+    y0,
+    width,
+    height,
+    interior,
+    redzone,
+    mode,
+    sensitive,
+  );
   const ink = new Uint8Array(rw * rh);
   for (let p = 0; p < rw * rh; p += 1) {
     const gx = x0 + (p % rw);
     const gy = y0 + Math.floor(p / rw);
     if (!isSafeMaskPixel(gx, gy, width, height, interior, redzone)) continue;
-    const isInk = mode === "light" ? lum[p] <= inkCut : lum[p] >= inkCut;
+    if (isBorderStrokePixel(lum, p, rw, x0, y0, width, height, redzone, mode)) {
+      continue;
+    }
+    const isInk = mode === "light" ? lum[p] <= cut : lum[p] >= cut;
     if (isInk) ink[p] = 1;
   }
 
@@ -412,8 +473,8 @@ function detectLetterPatches(
   const components: number[][] = [];
   const stack: number[] = [];
   let label = 0;
-  const minSize = sensitive ? 4 : 6;
-  const maxArea = Math.max(80, Math.floor(rw * rh * 0.12)); // reject rectangle fills
+  const minSize = sensitive ? 3 : 5;
+  const maxArea = Math.max(60, Math.floor(rw * rh * 0.08));
 
   for (let start = 0; start < rw * rh; start += 1) {
     if (!ink[start] || labels[start] >= 0) continue;
@@ -446,65 +507,64 @@ function detectLetterPatches(
         }
       }
     }
-
     const bw = maxX - minX + 1;
     const bh = maxY - minY + 1;
-    const boxArea = bw * bh;
-    const fillRatio = pixels.length / Math.max(1, boxArea);
-    // Drop noise, giant blobs, and solid rectangular patches
-    const tooBig = pixels.length > maxArea || (bw > rw * 0.7 && bh > rh * 0.55);
-    const solidRect = fillRatio > 0.72 && pixels.length > 40;
-    if (pixels.length >= minSize && !tooBig && !solidRect) {
-      components.push(pixels);
-    }
+    const fillRatio = pixels.length / Math.max(1, bw * bh);
+    const tooBig =
+      pixels.length > maxArea || (bw > rw * 0.65 && bh > rh * 0.5);
+    const solidRect = fillRatio > 0.7 && pixels.length > 35;
+    if (pixels.length >= minSize && !tooBig && !solidRect) components.push(pixels);
     label += 1;
   }
   return components;
 }
 
-/** Border stroke? (the ")" in user's example) — must never stay painted white */
-function isBorderStrokePixel(
+function localPaperColor(
+  data: Uint8ClampedArray,
   lum: Float32Array,
   p: number,
   rw: number,
   rh: number,
-  x0: number,
-  y0: number,
-  width: number,
-  height: number,
-  redzone: Uint8Array,
   mode: "light" | "dark",
-): boolean {
+  cut: number,
+): Rgb {
   const y = Math.floor(p / rw);
   const x = p - y * rw;
-  const gx = x0 + x;
-  const gy = y0 + y;
-  const g = gy * width + gx;
-  if (redzone[g]) return true;
-
-  const v = lum[p];
-  const dark = mode === "light" ? v < 90 : v > 165;
-  if (!dark) return false;
-
-  // Touching redzone / exterior within 2px ⇒ balloon line fragment
-  for (let dy = -2; dy <= 2; dy += 1) {
-    for (let dx = -2; dx <= 2; dx += 1) {
-      const nx = gx + dx;
-      const ny = gy + dy;
-      if (nx < 0 || ny < 0 || nx >= width || ny >= height) return true;
-      if (redzone[ny * width + nx]) return true;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let n = 0;
+  for (let dy = -3; dy <= 3; dy += 1) {
+    for (let dx = -3; dx <= 3; dx += 1) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
+      const np = ny * rw + nx;
+      const v = lum[np];
+      const paper = mode === "light" ? v > cut + 40 : v < cut - 40;
+      if (!paper) continue;
+      const i = np * 4;
+      r += data[i];
+      g += data[i + 1];
+      b += data[i + 2];
+      n += 1;
     }
   }
-  return false;
+  if (!n) {
+    return mode === "light"
+      ? { r: 255, g: 255, b: 255 }
+      : { r: 0, g: 0, b: 0 };
+  }
+  return {
+    r: Math.round(r / n),
+    g: Math.round(g / n),
+    b: Math.round(b / n),
+  };
 }
 
-/**
- * Paint ONLY letter pixels (+ thin antialias). Never a rectangle.
- * If a patch is ~75% letter and ~25% border, restore the 25% border.
- */
-function applyLetterPatches(
+/** Method A: ***** letter erase — ONLY dark glyph pixels, no rectangle fill */
+function eraseMethodLetterPatches(
   data: Uint8ClampedArray,
-  original: Uint8ClampedArray,
   lum: Float32Array,
   components: number[][],
   rw: number,
@@ -515,79 +575,128 @@ function applyLetterPatches(
   height: number,
   interior: Uint8Array,
   redzone: Uint8Array,
-  fill: Rgb,
   mode: "light" | "dark",
-) {
+  cut: number,
+): number {
   let wiped = 0;
-
   for (const pixels of components) {
-    const candidates: number[] = [];
     for (const p of pixels) {
-      const y = Math.floor(p / rw);
-      const x = p - y * rw;
-      // Only the glyph itself + 1px gray antialias (not empty paper block)
-      for (let dy = -1; dy <= 1; dy += 1) {
-        for (let dx = -1; dx <= 1; dx += 1) {
-          const nx = x + dx;
-          const ny = y + dy;
-          if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
-          const np = ny * rw + nx;
-          const gx = x0 + nx;
-          const gy = y0 + ny;
-          if (!isSafeMaskPixel(gx, gy, width, height, interior, redzone)) continue;
-          if (isBorderStrokePixel(lum, np, rw, rh, x0, y0, width, height, redzone, mode)) {
-            continue; // never touch ")" balloon stroke
-          }
-          const v = lum[np];
-          const isCore = dx === 0 && dy === 0;
-          const isAntialias =
-            mode === "light" ? v < 210 : v > 40;
-          if (isCore || isAntialias) candidates.push(np);
-        }
+      const gx = x0 + (p % rw);
+      const gy = y0 + Math.floor(p / rw);
+      if (!isSafeMaskPixel(gx, gy, width, height, interior, redzone)) continue;
+      if (isBorderStrokePixel(lum, p, rw, x0, y0, width, height, redzone, mode)) {
+        continue; // 25% border share → skip
       }
-    }
-
-    // Unique candidates
-    const uniq = Array.from(new Set(candidates));
-    if (!uniq.length) continue;
-
-    let borderish = 0;
-    for (const p of uniq) {
-      if (isBorderStrokePixel(lum, p, rw, rh, x0, y0, width, height, redzone, mode)) {
-        borderish += 1;
-      }
-    }
-    // If too much of patch looks like border, skip entire patch
-    if (borderish / uniq.length > 0.35) continue;
-
-    for (const p of uniq) {
-      // 75/25 rule: drop the border portion
-      if (isBorderStrokePixel(lum, p, rw, rh, x0, y0, width, height, redzone, mode)) {
-        continue;
-      }
+      // Core ink only (no wide antialias halo → no white blocks)
+      const isInk = mode === "light" ? lum[p] <= cut : lum[p] >= cut;
+      if (!isInk) continue;
+      const paper = localPaperColor(data, lum, p, rw, rh, mode, cut);
       const i = p * 4;
-      // Only overwrite real ink / gray — never blank white paper (avoids rectangles)
-      const ov =
-        0.299 * original[i] + 0.587 * original[i + 1] + 0.114 * original[i + 2];
-      const paintable = mode === "light" ? ov < 215 : ov > 35;
-      if (!paintable) continue;
-
-      data[i] = fill.r;
-      data[i + 1] = fill.g;
-      data[i + 2] = fill.b;
+      data[i] = paper.r;
+      data[i + 1] = paper.g;
+      data[i + 2] = paper.b;
       data[i + 3] = 255;
       wiped += 1;
     }
   }
-
   return wiped;
 }
 
 /**
- * STEP: harf harf maskele (a b c → * * *)
- * Dikdörtgen alan BOYANMAZ. Balon çizgisine değen % kısım geri alınır.
+ * Method B (different program): local inpaint of leftover ink pixels.
+ * Each ink pixel ← average of nearby paper pixels. Never fills a region.
  */
-function maskLettersInsideBoundary(
+function eraseMethodLocalInpaint(
+  data: Uint8ClampedArray,
+  lum: Float32Array,
+  rw: number,
+  rh: number,
+  x0: number,
+  y0: number,
+  width: number,
+  height: number,
+  interior: Uint8Array,
+  redzone: Uint8Array,
+  mode: "light" | "dark",
+  cut: number,
+): number {
+  const targets: number[] = [];
+  for (let p = 0; p < rw * rh; p += 1) {
+    const gx = x0 + (p % rw);
+    const gy = y0 + Math.floor(p / rw);
+    if (!isSafeMaskPixel(gx, gy, width, height, interior, redzone)) continue;
+    if (isBorderStrokePixel(lum, p, rw, x0, y0, width, height, redzone, mode)) {
+      continue;
+    }
+    const isInk = mode === "light" ? lum[p] <= cut + 8 : lum[p] >= cut - 8;
+    if (isInk) targets.push(p);
+  }
+
+  let wiped = 0;
+  for (const p of targets) {
+    const paper = localPaperColor(data, lum, p, rw, rh, mode, cut);
+    const i = p * 4;
+    data[i] = paper.r;
+    data[i + 1] = paper.g;
+    data[i + 2] = paper.b;
+    data[i + 3] = 255;
+    wiped += 1;
+  }
+  return wiped;
+}
+
+/** Detector: remaining text ink inside safe zone? */
+function detectRemainingText(
+  lum: Float32Array,
+  rw: number,
+  rh: number,
+  x0: number,
+  y0: number,
+  width: number,
+  height: number,
+  interior: Uint8Array,
+  redzone: Uint8Array,
+  mode: "light" | "dark",
+): { leftover: boolean; inkPixels: number; components: number } {
+  const cut = inkThreshold(
+    lum,
+    rw,
+    rh,
+    x0,
+    y0,
+    width,
+    height,
+    interior,
+    redzone,
+    mode,
+    true,
+  );
+  const comps = detectLetterPatches(
+    lum,
+    rw,
+    rh,
+    x0,
+    y0,
+    width,
+    height,
+    interior,
+    redzone,
+    mode,
+    true,
+  );
+  let inkPixels = 0;
+  for (const c of comps) inkPixels += c.length;
+  // Ignore tiny noise
+  const leftover = comps.length >= 1 && inkPixels >= 12;
+  return { leftover, inkPixels, components: comps.length };
+}
+
+/**
+ * Full erase chain:
+ * A ***** letter erase → detector → B local-inpaint (farklı program) → detector…
+ * Çeviri ancak detector temiz derse (veya denemeler bitince) eklenir.
+ */
+function eraseTextGuarded(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
@@ -595,66 +704,129 @@ function maskLettersInsideBoundary(
   interior: Uint8Array,
   redzone: Uint8Array,
   mode: "light" | "dark",
-  fill: Rgb,
-) {
-  // Tight crop around text only — no bubble-wide region
-  const pad = Math.max(1, Math.min(textPx.w, textPx.h) * 0.02);
+): boolean {
+  const pad = Math.max(1, Math.min(textPx.w, textPx.h) * 0.015);
   const x0 = Math.max(0, Math.floor(textPx.x - pad));
   const y0 = Math.max(0, Math.floor(textPx.y - pad));
   const x1 = Math.min(width, Math.ceil(textPx.x + textPx.w + pad));
   const y1 = Math.min(height, Math.ceil(textPx.y + textPx.h + pad));
   const rw = x1 - x0;
   const rh = y1 - y0;
-  if (rw < 2 || rh < 2) return;
+  if (rw < 2 || rh < 2) return false;
 
   const img = ctx.getImageData(x0, y0, rw, rh);
   const { data } = img;
-  const original = new Uint8ClampedArray(data); // for 75/25 restore logic
 
-  const readLum = () => {
-    const lum = new Float32Array(rw * rh);
-    for (let p = 0, i = 0; p < rw * rh; p += 1, i += 4) {
-      lum[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-    }
-    return lum;
+  const runDetect = () => {
+    const lum = readRegionLum(data, rw * rh);
+    return {
+      lum,
+      cut: inkThreshold(
+        lum,
+        rw,
+        rh,
+        x0,
+        y0,
+        width,
+        height,
+        interior,
+        redzone,
+        mode,
+        true,
+      ),
+      report: detectRemainingText(
+        lum,
+        rw,
+        rh,
+        x0,
+        y0,
+        width,
+        height,
+        interior,
+        redzone,
+        mode,
+      ),
+    };
   };
 
-  let lum = readLum();
-  let comps = detectLetterPatches(
-    lum,
-    rw,
-    rh,
-    x0,
-    y0,
-    width,
-    height,
-    interior,
-    redzone,
-    mode,
-    false,
-  );
-  applyLetterPatches(
-    data,
-    original,
-    lum,
-    comps,
-    rw,
-    rh,
-    x0,
-    y0,
-    width,
-    height,
-    interior,
-    redzone,
-    fill,
-    mode,
-  );
+  // 1) Method A — ***** harf silme
+  let { lum, cut } = (() => {
+    const L = readRegionLum(data, rw * rh);
+    const C = inkThreshold(
+      L,
+      rw,
+      rh,
+      x0,
+      y0,
+      width,
+      height,
+      interior,
+      redzone,
+      mode,
+      false,
+    );
+    const comps = detectLetterPatches(
+      L,
+      rw,
+      rh,
+      x0,
+      y0,
+      width,
+      height,
+      interior,
+      redzone,
+      mode,
+      false,
+    );
+    eraseMethodLetterPatches(
+      data,
+      L,
+      comps,
+      rw,
+      rh,
+      x0,
+      y0,
+      width,
+      height,
+      interior,
+      redzone,
+      mode,
+      C,
+    );
+    return { lum: L, cut: C };
+  })();
 
-  // Supervisor: find leftover letters, patch again (still no rectangles)
+  // 2) Detector → if leftover, Method B (farklı silme)
   for (let round = 0; round < 3; round += 1) {
-    lum = readLum();
-    comps = detectLetterPatches(
+    const d = runDetect();
+    lum = d.lum;
+    cut = d.cut;
+    if (!d.report.leftover) {
+      ctx.putImageData(img, x0, y0);
+      return true; // clean — çeviriye geçilebilir
+    }
+    // Farklı program: local inpaint
+    eraseMethodLocalInpaint(
+      data,
       lum,
+      rw,
+      rh,
+      x0,
+      y0,
+      width,
+      height,
+      interior,
+      redzone,
+      mode,
+      cut,
+    );
+  }
+
+  // Last try: sensitive ***** again
+  {
+    const L = readRegionLum(data, rw * rh);
+    const C = inkThreshold(
+      L,
       rw,
       rh,
       x0,
@@ -666,11 +838,22 @@ function maskLettersInsideBoundary(
       mode,
       true,
     );
-    if (!comps.length) break;
-    const wiped = applyLetterPatches(
+    const comps = detectLetterPatches(
+      L,
+      rw,
+      rh,
+      x0,
+      y0,
+      width,
+      height,
+      interior,
+      redzone,
+      mode,
+      true,
+    );
+    eraseMethodLetterPatches(
       data,
-      original,
-      lum,
+      L,
       comps,
       rw,
       rh,
@@ -680,45 +863,14 @@ function maskLettersInsideBoundary(
       height,
       interior,
       redzone,
-      fill,
       mode,
+      C,
     );
-    if (wiped < 6) break;
   }
 
-  // Final pass: if we painted onto balloon stroke (the 25%), restore original
-  const origLum = new Float32Array(rw * rh);
-  for (let p = 0, i = 0; p < rw * rh; p += 1, i += 4) {
-    origLum[p] =
-      0.299 * original[i] + 0.587 * original[i + 1] + 0.114 * original[i + 2];
-  }
-  for (let p = 0; p < rw * rh; p += 1) {
-    const i = p * 4;
-    const painted =
-      data[i] === fill.r && data[i + 1] === fill.g && data[i + 2] === fill.b;
-    if (!painted) continue;
-    if (
-      isBorderStrokePixel(
-        origLum,
-        p,
-        rw,
-        rh,
-        x0,
-        y0,
-        width,
-        height,
-        redzone,
-        mode,
-      )
-    ) {
-      data[i] = original[i];
-      data[i + 1] = original[i + 1];
-      data[i + 2] = original[i + 2];
-      data[i + 3] = original[i + 3];
-    }
-  }
-
+  const final = runDetect();
   ctx.putImageData(img, x0, y0);
+  return !final.report.leftover;
 }
 
 function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number) {
@@ -875,12 +1027,12 @@ function drawDebug(
 
 /**
  * Zincir:
- * 1) Yazıları algıla
- * 2) Balonları algıla
- * 3) Balon sınırını algıla
- * 4) Yazıları HARF HARF maskele (balonu boyama)
- * 5) Balon sınırını tekrar algıla
- * 6) Çeviriyi balon içine yaz
+ * 1) Yazı algıla
+ * 2) Balon algıla
+ * 3) Balon sınırı algıla (redzone = çizgi, maske değmez)
+ * 4) ***** harf silme (A)
+ * 5) Detector → kalan yazı varsa farklı silme (B: local inpaint)
+ * 6) Temizse çeviriyi yaz
  */
 export async function renderTranslatedPage(
   imageDataUrl: string,
@@ -907,16 +1059,14 @@ export async function renderTranslatedPage(
   for (const bubble of ordered) {
     if (!bubble.translated?.trim() || !bubble.box) continue;
 
-    // 1-2) yazı + balon
     const bubblePx = toPx(resolveBubbleBox(bubble), width, height);
     const textPx = clipTextInsideBubble(toPx(bubble.box, width, height), bubblePx);
 
-    // 3) balon sınırı
     let seg = detectBubbleBoundary(ctx, width, height, bubblePx, textPx);
     if (!seg.bounds) continue;
 
-    // 4) harf harf maskele + denetleyici — balon çizgisine (redzone) ASLA değme
-    maskLettersInsideBoundary(
+    // Silme zinciri (dikdörtgen yok) + detector + plan B
+    eraseTextGuarded(
       ctx,
       width,
       height,
@@ -924,10 +1074,9 @@ export async function renderTranslatedPage(
       seg.interior,
       seg.redzone,
       seg.mode,
-      seg.fill,
     );
 
-    // 5) sınır tekrar
+    // Sınır tekrar (redzone taze)
     seg = detectBubbleBoundary(ctx, width, height, bubblePx, textPx);
     if (!seg.bounds) continue;
 
@@ -935,7 +1084,6 @@ export async function renderTranslatedPage(
       drawDebug(ctx, width, height, bubblePx, textPx, seg.interior, seg.redzone);
     }
 
-    // 6) çeviriyi balon içine yaz (yerleşim textBox merkezine yakın, sınır içinde)
     const place: PxBox = {
       x: Math.max(seg.bounds.x, textPx.x),
       y: Math.max(seg.bounds.y, textPx.y),

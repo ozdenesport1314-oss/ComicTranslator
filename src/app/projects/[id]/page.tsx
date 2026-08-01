@@ -368,8 +368,8 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              Sadece harf boyanır (abc→***). Dikdörtgen yok. Balon çizgisine
-              bulaşan kısım geri alınır.
+              ***** harf silme → detector → Plan B inpaint. Dikdörtgen yok.
+              Maske balon çizgisine değmez.
             </p>
           </div>
 
