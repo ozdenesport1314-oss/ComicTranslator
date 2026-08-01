@@ -150,26 +150,27 @@ function isProtected(
 }
 
 /**
- * Silme izni: redzone/stroke dışında serbest.
- * Interior zorunlu değildi — flood kaçırınca maske boş kalıp skor %0 oluyordu.
- * Crop zaten textBox; sınır koruması redzone ile.
+ * Silme izni: SADECE balon interior ∩ ¬redzone.
+ * Interior yoksa balon dışına beyaz katman taşıyordu (yüz/zırh hasarı).
  */
 function canEraseAt(
   gx: number,
   gy: number,
   width: number,
   height: number,
-  _interior: Uint8Array,
+  interior: Uint8Array,
   redzone: Uint8Array,
   stroke: Uint8Array,
 ): boolean {
   if (gx < 0 || gy < 0 || gx >= width || gy >= height) return false;
   const g = gy * width + gx;
+  if (!interior[g]) return false;
   if (redzone[g] || stroke[g]) return false;
   if (isProtected(gx, gy, width, height, redzone, stroke, 1)) return false;
   return true;
 }
 
+/** Gerçek harf mürekkebi — kağıdı / çeviri altı beyaz katmanı YASAK */
 function looksLikeInk(
   lum: Float32Array,
   p: number,
@@ -179,39 +180,38 @@ function looksLikeInk(
   cut: number,
 ): boolean {
   const v = lum[p];
-  // Comic bold ink is typically very dark on light bubbles
   if (mode === "light") {
-    if (v > cut) return false;
-    if (v <= 95) return true; // kesin mürekkep
+    // Sadece koyu stroke; orta gri kağıdı silme → beyaz dikdörtgen olmasın
+    if (v > Math.min(cut, 115)) return false;
+    if (v <= 85) return true;
   } else {
-    if (v < cut) return false;
-    if (v >= 170) return true;
+    if (v < Math.max(cut, 150)) return false;
+    if (v >= 185) return true;
   }
-  // Antialias kenarı: kağıda göre kontrast
   const y = Math.floor(p / rw);
   const x = p - y * rw;
   let paper = 0;
   let n = 0;
-  for (let dy = -3; dy <= 3; dy += 1) {
-    for (let dx = -3; dx <= 3; dx += 1) {
+  for (let dy = -2; dy <= 2; dy += 1) {
+    for (let dx = -2; dx <= 2; dx += 1) {
       if (!dx && !dy) continue;
       const nx = x + dx;
       const ny = y + dy;
       if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
       const nv = lum[ny * rw + nx];
-      const isPaper = mode === "light" ? nv > cut + 20 : nv < cut - 20;
+      const isPaper = mode === "light" ? nv > 190 : nv < 50;
       if (isPaper) {
         paper += nv;
         n += 1;
       }
     }
   }
-  if (!n) return mode === "light" ? v < 125 : v > 140;
+  if (!n) return mode === "light" ? v < 100 : v > 160;
   const paperAvg = paper / n;
-  return mode === "light" ? paperAvg - v >= 18 : v - paperAvg >= 18;
+  return mode === "light" ? paperAvg - v >= 45 : v - paperAvg >= 45;
 }
 
-/** Ham mürekkep sayısı — solidRect filtresi YOK (kalan İngilizceyi gizlemesin) */
+/** Ham mürekkep — yalnızca balon interior (orijinal yazı), çeviri-altı alanı değil */
 function countRawInkPixels(
   data: Uint8ClampedArray,
   rw: number,
@@ -220,6 +220,7 @@ function countRawInkPixels(
   y0: number,
   width: number,
   height: number,
+  interior: Uint8Array,
   redzone: Uint8Array,
   stroke: Uint8Array,
   kind: TextKind,
@@ -232,10 +233,7 @@ function countRawInkPixels(
   for (let p = 0; p < rw * rh; p += 1) {
     const gx = x0 + (p % rw);
     const gy = y0 + Math.floor(p / rw);
-    if (gx < 0 || gy < 0 || gx >= width || gy >= height) continue;
-    const g = gy * width + gx;
-    if (redzone[g] || stroke[g]) continue;
-    if (isProtected(gx, gy, width, height, redzone, stroke, 1)) continue;
+    if (!canEraseAt(gx, gy, width, height, interior, redzone, stroke)) continue;
     if (looksLikeInk(lum, p, rw, rh, kind.mode, kind.cut)) n += 1;
   }
   return n;
@@ -423,17 +421,15 @@ function part3DefineBoundary(
     }
   }
 
-  // Grow into ink islands fully surrounded by paper (letters inside bubble)
-  for (let iter = 0; iter < 14; iter += 1) {
+  // Grow into ink (harfler) — orijinal yazı interior'a alınmalı ki ***** silinebilsin
+  for (let iter = 0; iter < 22; iter += 1) {
     const add: number[] = [];
     for (let y = 1; y < rh - 1; y += 1) {
       for (let x = 1; x < rw - 1; x += 1) {
         const p = y * rw + x;
         if (local[p]) continue;
-        // Only absorb dark/light ink-like pixels, never mid-art
         const v = lum[p];
-        const inkLike =
-          mode === "light" ? v <= kind.cut + 15 : v >= kind.cut - 15;
+        const inkLike = mode === "light" ? v <= 130 : v >= 120;
         if (!inkLike) continue;
         let c = 0;
         for (let dy = -1; dy <= 1; dy += 1) {
@@ -441,7 +437,7 @@ function part3DefineBoundary(
             if (dx || dy) if (local[(y + dy) * rw + (x + dx)]) c += 1;
           }
         }
-        if (c >= 5) add.push(p);
+        if (c >= 3) add.push(p);
       }
     }
     if (!add.length) break;
@@ -696,24 +692,21 @@ function part4RecognizeTextInk(
     for (let i = 0; i < ink.length; i += 1) keep[i] = ink[i];
   }
 
-  // Dilate 1px (antialias halo) — still letter-shaped, not a box
+  // Dilate sadece koyu antialias halkası — beyaz kağıda genişleme YOK (beyaz katman önlemi)
   const out = new Uint8Array(keep);
   for (let y = 1; y < rh - 1; y += 1) {
     for (let x = 1; x < rw - 1; x += 1) {
       const p = y * rw + x;
       if (keep[p]) continue;
-      if (
-        keep[p - 1] ||
-        keep[p + 1] ||
-        keep[p - rw] ||
-        keep[p + rw]
-      ) {
-        const gx = x0 + x;
-        const gy = y0 + y;
-        if (canEraseAt(gx, gy, width, height, interior, redzone, stroke)) {
-          out[p] = 1;
-        }
+      if (!(keep[p - 1] || keep[p + 1] || keep[p - rw] || keep[p + rw])) {
+        continue;
       }
+      const gx = x0 + x;
+      const gy = y0 + y;
+      if (!canEraseAt(gx, gy, width, height, interior, redzone, stroke)) continue;
+      // Komşu harf olsa bile açık kağıdı maskeleme
+      if (kind.mode === "light" ? lum[p] > 150 : lum[p] < 90) continue;
+      out[p] = 1;
     }
   }
   return out;
@@ -1002,6 +995,7 @@ function measureEraseScore(
   rh: number,
   width: number,
   height: number,
+  interior: Uint8Array,
   redzone: Uint8Array,
   stroke: Uint8Array,
   kind: TextKind,
@@ -1018,6 +1012,7 @@ function measureEraseScore(
     ry0,
     width,
     height,
+    interior,
     redzone,
     stroke,
     kind,
@@ -1058,11 +1053,12 @@ function measureEraseScore(
 }
 
 /**
- * BallonsTranslator-tarzı 3 zincir:
- * 1) Yüzeysel ***** silme → detektör
- * 2) Kalan yazı → Telea + hassas ***** → detektör
- * 3) Nokta/çizgi ince ayar → detektör
- * Başarı = 1 - leftover/inkBefore ≥ CLEAN_THRESHOLD (%90 test)
+ * DOĞRU AKIŞ (çeviri altı beyaz katman DEĞİL):
+ * 1) Balon interior'daki ORİJİNAL harf mürekkebini ***** sil
+ * 2) Detektör → kalan varsa residual / ince ayar
+ * 3) Skor ≥ %90 ise temiz — çeviri SONRA yazılır (part11)
+ *
+ * Crop = balon bounds (çeviri kutusu değil) → tüm orijinal yazı hedeflenir.
  */
 function eraseUntilClean(
   ctx: CanvasRenderingContext2D,
@@ -1075,11 +1071,24 @@ function eraseUntilClean(
   const { interior, redzone, stroke, bounds } = boundary;
   if (!bounds) return false;
 
-  const pad = Math.max(2, Math.min(textPx.w, textPx.h) * 0.08);
-  const rx0 = Math.max(0, Math.floor(textPx.x - pad));
-  const ry0 = Math.max(0, Math.floor(textPx.y - pad));
-  const rx1 = Math.min(width, Math.ceil(textPx.x + textPx.w + pad));
-  const ry1 = Math.min(height, Math.ceil(textPx.y + textPx.h + pad));
+  // Tüm orijinal yazı: balon interior bbox ∪ textBox (sadece çeviri slotu değil)
+  const pad = Math.max(2, Math.min(bounds.w, bounds.h) * 0.04);
+  const rx0 = Math.max(
+    0,
+    Math.floor(Math.min(bounds.x, textPx.x) - pad),
+  );
+  const ry0 = Math.max(
+    0,
+    Math.floor(Math.min(bounds.y, textPx.y) - pad),
+  );
+  const rx1 = Math.min(
+    width,
+    Math.ceil(Math.max(bounds.x + bounds.w, textPx.x + textPx.w) + pad),
+  );
+  const ry1 = Math.min(
+    height,
+    Math.ceil(Math.max(bounds.y + bounds.h, textPx.y + textPx.h) + pad),
+  );
   const rw = rx1 - rx0;
   const rh = ry1 - ry0;
   if (rw < 2 || rh < 2) return false;
@@ -1093,6 +1102,7 @@ function eraseUntilClean(
     ry0,
     width,
     height,
+    interior,
     redzone,
     stroke,
     kind,
@@ -1130,6 +1140,7 @@ function eraseUntilClean(
       rh,
       width,
       height,
+      interior,
       redzone,
       stroke,
       kind,
@@ -1208,6 +1219,7 @@ function eraseUntilClean(
       rh,
       width,
       height,
+      interior,
       redzone,
       stroke,
       kind,
@@ -1272,6 +1284,7 @@ function eraseUntilClean(
       rh,
       width,
       height,
+      interior,
       redzone,
       stroke,
       kind,

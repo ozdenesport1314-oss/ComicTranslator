@@ -368,8 +368,8 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              3 zincir silme (maske boş kalma bug’ı düzeltildi). Eşik %90 —
-              sorun eşik değil, silmenin çalışmasıydı.
+              Önce balondaki orijinal harfler silinir, sonra çeviri yazılır.
+              Çeviri altına beyaz katman yok.
             </p>
           </div>
 
