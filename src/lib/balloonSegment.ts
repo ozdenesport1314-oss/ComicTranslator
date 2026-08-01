@@ -213,7 +213,7 @@ export function letterDomain(
   // Eski allowedArea*0.35 kapısı bu yüzden gerçek balon yazısını da reddediyordu.
   // Ölçüt: yazı kutusu kadar anlamlı bir kağıt bölgesi var mı?
   if (!flood || flood.area < textW * textH * 0.18) {
-    return inkNearPaper(lum, rw, rh, mode, text, opts);
+    return inkComponentsOnPaper(lum, rw, rh, mode, text, opts);
   }
 
   // Kağıt alanını genişletmek kutunun DIŞINDAKİ sanatı da siliyordu. Bunun
@@ -282,7 +282,162 @@ export function letterDomain(
       any += 1;
     }
   }
-  return any ? domain : inkNearPaper(lum, rw, rh, mode, text, opts);
+  return any ? domain : inkComponentsOnPaper(lum, rw, rh, mode, text, opts);
+}
+
+/**
+ * Harfleri bağlı bileşen olarak bulur: bir bileşen ancak ÇEVRESİ kağıtsa
+ * silinir.
+ *
+ * Flood tabanlı balon arama beyaz-üstü-beyaz balonlarda (tırtıklı bağırma
+ * balonu, panel kenarına oturan caption) sızıntı yüzünden reddediliyor;
+ * eski yedekler de null dönüp balonu tamamen atlıyordu, yani ekranda
+ * İngilizce kalıyordu. Bu yol kağıt üstündeki her yazıda çalışır.
+ *
+ * Sanat güvenliği bileşen testlerinden gelir: tarama/hatch çizgileri uzundur,
+ * kutu sınırını aşar ve çevresi kağıt değildir; halftone noktalarının çevresi
+ * de kağıt sayılmaz.
+ */
+export function inkComponentsOnPaper(
+  lum: Float32Array,
+  rw: number,
+  rh: number,
+  mode: "light" | "dark",
+  text: TextRect,
+  opts: { cut: number; paperLum: number },
+): Uint8Array | null {
+  const textW = Math.max(1, text.x1 - text.x0 + 1);
+  const textH = Math.max(1, text.y1 - text.y0 + 1);
+  const allowed: TextRect = {
+    x0: Math.max(0, text.x0 - Math.round(textW * 0.1 + 6)),
+    y0: Math.max(0, text.y0 - Math.round(textH * 0.18 + 6)),
+    x1: Math.min(rw - 1, text.x1 + Math.round(textW * 0.1 + 6)),
+    y1: Math.min(rh - 1, text.y1 + Math.round(textH * 0.18 + 6)),
+  };
+  const aw = allowed.x1 - allowed.x0 + 1;
+  const ah = allowed.y1 - allowed.y0 + 1;
+  if (aw < 6 || ah < 6) return null;
+
+  const paperThr =
+    mode === "light"
+      ? Math.max(170, opts.paperLum - 45)
+      : Math.min(85, opts.paperLum + 45);
+  const isPaper = (v: number) =>
+    mode === "light" ? v >= paperThr : v <= paperThr;
+  const isInk = (v: number) =>
+    mode === "light" ? v < opts.cut : v > opts.cut;
+
+  const visited = new Uint8Array(rw * rh);
+  const accepted = new Uint8Array(rw * rh);
+  const queue = new Int32Array(aw * ah);
+  const pixels: number[] = [];
+  let anyAccepted = false;
+
+  for (let sy = allowed.y0; sy <= allowed.y1; sy += 1) {
+    for (let sx = allowed.x0; sx <= allowed.x1; sx += 1) {
+      const seed = sy * rw + sx;
+      if (visited[seed] || !isInk(lum[seed])) continue;
+
+      let qh = 0;
+      let qt = 0;
+      visited[seed] = 1;
+      queue[qt++] = seed;
+      pixels.length = 0;
+      let minX = sx;
+      let maxX = sx;
+      let minY = sy;
+      let maxY = sy;
+      let touchesBorder = false;
+
+      while (qh < qt) {
+        const p = queue[qh++];
+        const y = Math.floor(p / rw);
+        const x = p - y * rw;
+        pixels.push(p);
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        if (
+          x === allowed.x0 ||
+          x === allowed.x1 ||
+          y === allowed.y0 ||
+          y === allowed.y1
+        ) {
+          touchesBorder = true;
+        }
+        for (const [dx, dy] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+          [1, 1],
+          [1, -1],
+          [-1, 1],
+          [-1, -1],
+        ] as const) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (
+            nx < allowed.x0 ||
+            nx > allowed.x1 ||
+            ny < allowed.y0 ||
+            ny > allowed.y1
+          ) {
+            continue;
+          }
+          const np = ny * rw + nx;
+          if (visited[np] || !isInk(lum[np])) continue;
+          visited[np] = 1;
+          queue[qt++] = np;
+        }
+      }
+
+      // Kutu sınırını aşan bileşen sanattır (hatch/çerçeve), harf değil.
+      if (touchesBorder) continue;
+      const area = pixels.length;
+      if (area < 4) continue;
+      const bw = maxX - minX + 1;
+      const bh = maxY - minY + 1;
+      if (bh > textH + 8) continue;
+      if (bw > textW * 0.9 + 6) continue;
+
+      // Harfin çevresi kağıttır; hatch çizgisinin çevresi başka çizgidir.
+      let ring = 0;
+      let ringPaper = 0;
+      for (let y = Math.max(allowed.y0, minY - 2); y <= Math.min(allowed.y1, maxY + 2); y += 1) {
+        for (let x = Math.max(allowed.x0, minX - 2); x <= Math.min(allowed.x1, maxX + 2); x += 1) {
+          const p = y * rw + x;
+          if (visited[p] && isInk(lum[p])) continue;
+          const nearX = x >= minX - 2 && x <= maxX + 2;
+          const nearY = y >= minY - 2 && y <= maxY + 2;
+          if (!nearX || !nearY) continue;
+          ring += 1;
+          if (isPaper(lum[p])) ringPaper += 1;
+        }
+      }
+      if (!ring || ringPaper / ring < 0.55) continue;
+
+      for (const p of pixels) accepted[p] = 1;
+      anyAccepted = true;
+    }
+  }
+  if (!anyAccepted) return null;
+
+  // Antialias halkası kalırsa balonda hayalet yazı görünür.
+  const grown = dilate(dilate(accepted, rw, rh), rw, rh);
+  const domain = new Uint8Array(rw * rh);
+  let any = 0;
+  for (let y = allowed.y0; y <= allowed.y1; y += 1) {
+    for (let x = allowed.x0; x <= allowed.x1; x += 1) {
+      const p = y * rw + x;
+      if (!grown[p]) continue;
+      if (!accepted[p] && isPaper(lum[p])) continue;
+      domain[p] = 1;
+      any += 1;
+    }
+  }
+  return any ? domain : null;
 }
 
 /**

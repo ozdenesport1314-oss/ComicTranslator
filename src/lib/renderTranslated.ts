@@ -1,6 +1,6 @@
 import {
   findEnclosedBalloons,
-  inkNearPaper,
+  inkComponentsOnPaper,
   letterDomain,
   type TextRect,
 } from "./balloonSegment";
@@ -683,15 +683,10 @@ function part3DefineBoundary(
   // Flood yalnızca bir balonu bulduysa (veya metnin bir kısmını kaçırdıysa)
   // yazı kutusundaki kağıt-üstü mürekkebi de interior'a ekle. Bu, komşu
   // balonların yanlış birleşmesinde HARDLY'nin yeşilsiz kalmasını engeller.
-  const letterMask =
-    letterDomain(lum, rw, rh, mode, text, {
-      cut: kind.cut,
-      paperLum: luminance(kind.fill.r, kind.fill.g, kind.fill.b),
-    }) ??
-    inkNearPaper(lum, rw, rh, mode, text, {
-      cut: kind.cut,
-      paperLum: luminance(kind.fill.r, kind.fill.g, kind.fill.b),
-    });
+  const letterMask = inkComponentsOnPaper(lum, rw, rh, mode, text, {
+    cut: kind.cut,
+    paperLum: luminance(kind.fill.r, kind.fill.g, kind.fill.b),
+  });
   if (letterMask) {
     for (let y = 0; y < rh; y += 1) {
       for (let x = 0; x < rw; x += 1) {

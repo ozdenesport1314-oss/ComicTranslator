@@ -6,6 +6,7 @@
 import {
   findEnclosedBalloon,
   findEnclosedBalloons,
+  inkComponentsOnPaper,
   inkNearPaper,
   letterDomain,
   type TextRect,
@@ -389,6 +390,109 @@ const check = (name: string, pass: boolean, detail: string) =>
     "inkNearPaper yalnız kağıt üstünde mürekkep seçer",
     onArt === null && !!onPaper && onPaper.reduce((a, b) => a + b, 0) > 40,
     `art=${onArt ? "var" : "null"} paper=${onPaper ? onPaper.reduce((a, b) => a + b, 0) : "null"}`,
+  );
+}
+
+/** Harf pikselleri: maskenin yazıyı gerçekten kapsayıp kapsamadığını ölçer. */
+function inkCoverage(scene: Scene, mask: Uint8Array | null, cut: number) {
+  let ink = 0;
+  let covered = 0;
+  for (let y = scene.text.y0; y <= scene.text.y1; y += 1) {
+    for (let x = scene.text.x0; x <= scene.text.x1; x += 1) {
+      const p = y * scene.rw + x;
+      if (scene.lum[p] >= cut) continue;
+      ink += 1;
+      if (mask && mask[p]) covered += 1;
+    }
+  }
+  return ink ? covered / ink : 0;
+}
+
+// --- Senaryo 15: sızıntılı tırtıklı beyaz balon → balon bulunmasa da harf silinir ---
+{
+  const scene = blankScene(300, 220, 250); // beyaz sayfa
+  fillEllipse(scene, 150, 110, 80, 60, 0);
+  fillEllipse(scene, 150, 110, 77, 57, 250);
+  fillRect(scene, 148, 48, 152, 54, 250); // kenarda boşluk → flood sızar
+  addTextLines(scene, [[110, 95, 190, 125]]);
+  scene.text = { x0: 110, y0: 95, x1: 190, y1: 125 };
+  const hint: TextRect = { x0: 105, y0: 90, x1: 195, y1: 130 };
+
+  const balloon = findEnclosedBalloons(
+    scene.lum,
+    scene.rw,
+    scene.rh,
+    "light",
+    scene.text,
+    hint,
+  );
+  const letters = inkComponentsOnPaper(
+    scene.lum,
+    scene.rw,
+    scene.rh,
+    "light",
+    scene.text,
+    { cut: 140, paperLum: 250 },
+  );
+  const coverage = inkCoverage(scene, letters, 140);
+  check(
+    "sızıntılı balonda harfler yine temizlenir",
+    balloon === null && coverage > 0.9,
+    `balon=${balloon ? "var" : "null"} kapsama=${coverage.toFixed(2)}`,
+  );
+}
+
+// --- Senaryo 16: panel kenarına oturan caption → harfler temizlenir, sanat değil ---
+{
+  const scene = blankScene(300, 200, 250);
+  for (let y = 20; y < 180; y += 3) fillRect(scene, 20, y, 279, y + 1, 30); // koyu panel
+  fillRect(scene, 18, 40, 130, 100, 250); // panel kenarını aşan beyaz caption
+  addTextLines(scene, [[30, 55, 120, 85]]);
+  scene.text = { x0: 30, y0: 55, x1: 120, y1: 85 };
+  const letters = inkComponentsOnPaper(
+    scene.lum,
+    scene.rw,
+    scene.rh,
+    "light",
+    scene.text,
+    { cut: 140, paperLum: 250 },
+  );
+  const coverage = inkCoverage(scene, letters, 140);
+  let outsideBox = 0;
+  if (letters) {
+    for (let p = 0; p < letters.length; p += 1) {
+      if (!letters[p]) continue;
+      const y = Math.floor(p / scene.rw);
+      const x = p - y * scene.rw;
+      if (x < 18 || x > 130 || y < 40 || y > 100) outsideBox += 1;
+    }
+  }
+  check(
+    "panel kenarındaki caption temizlenir, dışına taşmaz",
+    coverage > 0.9 && outsideBox === 0,
+    `kapsama=${coverage.toFixed(2)} dış=${outsideBox}`,
+  );
+}
+
+// --- Senaryo 17: yoğun tarama sanatı üzerinde hiçbir şey silinmez ---
+{
+  const scene = blankScene(260, 200, 235);
+  for (let y = 20; y < 180; y += 4) fillRect(scene, 20, y, 239, y + 1, 25);
+  for (let x = 20; x < 240; x += 5) fillRect(scene, x, 20, x + 1, 179, 40);
+  scene.text = { x0: 70, y0: 70, x1: 180, y1: 120 };
+  const letters = inkComponentsOnPaper(
+    scene.lum,
+    scene.rw,
+    scene.rh,
+    "light",
+    scene.text,
+    { cut: 140, paperLum: 250 },
+  );
+  const area = letters ? letters.reduce((a, b) => a + b, 0) : 0;
+  check(
+    "tarama sanatında silme alanı üretilmiyor",
+    area === 0,
+    letters ? `alan=${area}` : "null",
   );
 }
 
