@@ -1023,6 +1023,71 @@ function countDarkInkInInterior(
 }
 
 /**
+ * BallonsTranslator yaklaşımı: arka plan düşük varyanslı/ağırlıkla kağıtsa,
+ * dikdörtgen değil TAM BALON INTERIOR MASKESİNİ medyan renkle temizle.
+ * Böylece harf aralarında İngilizce kalmaz; redzone kabuğu aynen korunur.
+ */
+function tryUniformBubbleClean(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  boundary: Boundary,
+  kind: TextKind,
+): boolean {
+  const { borderBackup, backupX, backupY, interior, redzone, stroke } = boundary;
+  const rw = borderBackup.width;
+  const rh = borderBackup.height;
+  if (rw < 4 || rh < 4) return false;
+
+  let inside = 0;
+  let paper = 0;
+  const fillLum = luminance(kind.fill.r, kind.fill.g, kind.fill.b);
+  for (let y = 0; y < rh; y += 1) {
+    for (let x = 0; x < rw; x += 1) {
+      const gx = backupX + x;
+      const gy = backupY + y;
+      const g = gy * width + gx;
+      if (!interior[g] || redzone[g] || stroke[g]) continue;
+      inside += 1;
+      const i = (y * rw + x) * 4;
+      const v = luminance(
+        borderBackup.data[i],
+        borderBackup.data[i + 1],
+        borderBackup.data[i + 2],
+      );
+      const paperLike =
+        kind.mode === "light"
+          ? v >= Math.max(165, fillLum - 65)
+          : v <= Math.min(90, fillLum + 65);
+      if (paperLike) paper += 1;
+    }
+  }
+
+  const cropArea = rw * rh;
+  const coverage = inside / Math.max(1, cropArea);
+  const paperRatio = paper / Math.max(1, inside);
+  // Fallback ellipse / artwork bölgesi bu kapıdan geçmez.
+  if (coverage < 0.28 || paperRatio < 0.58) return false;
+
+  const img = ctx.getImageData(backupX, backupY, rw, rh);
+  for (let y = 0; y < rh; y += 1) {
+    for (let x = 0; x < rw; x += 1) {
+      const gx = backupX + x;
+      const gy = backupY + y;
+      const g = gy * width + gx;
+      if (!interior[g] || redzone[g] || stroke[g]) continue;
+      const i = (y * rw + x) * 4;
+      img.data[i] = kind.fill.r;
+      img.data[i + 1] = kind.fill.g;
+      img.data[i + 2] = kind.fill.b;
+      img.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, backupX, backupY);
+  part10RepairBoundaryWithWidth(ctx, boundary, width);
+  return true;
+}
+
+/**
  * ***** silme: balon interior'daki koyu harf piksellerini kağıt rengiyle değiştir.
  * Redzone'a ASLA değmez. Çeviri kutusu boyamaz — sadece mürekkep.
  */
@@ -1036,6 +1101,9 @@ function eraseUntilClean(
 ): boolean {
   const { interior, redzone, stroke, bounds } = boundary;
   if (!bounds) return false;
+
+  // Düşük varyanslı konuşma balonu: exact-shape full interior cleanup.
+  if (tryUniformBubbleClean(ctx, width, boundary, kind)) return true;
 
   const pad = Math.max(2, Math.min(bounds.w, bounds.h) * 0.03);
   const rx0 = Math.max(0, Math.floor(bounds.x - pad));
@@ -1406,6 +1474,16 @@ function boxIou(a: PxBox, b: PxBox): number {
   return union > 0 ? intersection / union : 0;
 }
 
+function boxOverlapOfSmaller(a: PxBox, b: PxBox): number {
+  const x0 = Math.max(a.x, b.x);
+  const y0 = Math.max(a.y, b.y);
+  const x1 = Math.min(a.x + a.w, b.x + b.w);
+  const y1 = Math.min(a.y + a.h, b.y + b.h);
+  const intersection = Math.max(0, x1 - x0) * Math.max(0, y1 - y0);
+  const smaller = Math.min(a.w * a.h, b.w * b.h);
+  return smaller > 0 ? intersection / smaller : 0;
+}
+
 function unionBox(a: PxBox, b: PxBox): PxBox {
   const x = Math.min(a.x, b.x);
   const y = Math.min(a.y, b.y);
@@ -1438,7 +1516,11 @@ function groupBubbleInputs(
       toPx(bubble.box, width, height),
       bubblePx,
     );
-    const existing = grouped.find((g) => boxIou(g.bubblePx, bubblePx) >= 0.72);
+    const existing = grouped.find(
+      (g) =>
+        boxIou(g.bubblePx, bubblePx) >= 0.5 ||
+        boxOverlapOfSmaller(g.bubblePx, bubblePx) >= 0.68,
+    );
     if (!existing) {
       grouped.push({ bubble: { ...bubble }, bubblePx, textPx });
       continue;

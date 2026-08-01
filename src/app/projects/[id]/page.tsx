@@ -368,8 +368,8 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              Faz 1: tüm balon/redzone orijinalden. Faz 2: tüm yazıları sil.
-              Faz 3: tüm Türkçeleri yaz. Aynı balon parçaları birleştirilir.
+              Beyaz balon exact-shape temizlenir (dikdörtgen değil). Parçalı
+              metinler birleştirilir; tüm temizlikten sonra Türkçe yazılır.
             </p>
           </div>
 
