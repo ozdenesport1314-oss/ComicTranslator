@@ -3,7 +3,11 @@
  *
  * Amaç: balon şekli mi yoksa Gemini kutusu mu temizleniyor sorusunu ölçmek.
  */
-import { findEnclosedBalloon, type TextRect } from "../src/lib/balloonSegment";
+import {
+  findEnclosedBalloon,
+  letterDomain,
+  type TextRect,
+} from "../src/lib/balloonSegment";
 
 type Scene = { lum: Float32Array; rw: number; rh: number; text: TextRect };
 
@@ -199,6 +203,79 @@ const check = (name: string, pass: boolean, detail: string) =>
     "antialias kenarlı balon sıkı eşikle kabul edildi",
     !!stats && stats.minX >= 70 && stats.maxX <= 230 && stats.area < 14000,
     stats ? `alan=${stats.area} bbox=${stats.minX}..${stats.maxX}` : "maske yok",
+  );
+}
+
+// --- Senaryo 8: balon komşu beyaz alana sızıyor → dolgu kabul edilmemeli ---
+// Sızıntı kabul edilirse dolgu balon çizgisini yutar ve sanata taşar.
+{
+  const scene = blankScene(320, 240, 40);
+  fillRect(scene, 20, 20, 300, 220, 250); // geniş beyaz siluet alanı
+  fillEllipse(scene, 120, 120, 60, 42, 0);
+  fillEllipse(scene, 120, 120, 57, 39, 250);
+  fillRect(scene, 116, 78, 124, 84, 250); // çizgide boşluk → beyaz alana akıyor
+  addTextLines(scene, [[85, 108, 155, 132]]);
+  scene.text = { x0: 85, y0: 108, x1: 155, y1: 132 };
+  const hint: TextRect = { x0: 58, y0: 76, x1: 182, y1: 164 };
+  const mask = findEnclosedBalloon(
+    scene.lum,
+    scene.rw,
+    scene.rh,
+    "light",
+    scene.text,
+    hint,
+  );
+  const stats = mask ? maskStats(mask, scene.rw) : null;
+  check(
+    "komşu beyaz alana sızan dolgu reddedildi",
+    !stats || (stats.maxX - stats.minX < 150 && stats.area < 9000),
+    stats ? `alan=${stats.area} bbox=${stats.minX}..${stats.maxX}` : "null",
+  );
+}
+
+// --- Senaryo 9: yazı doğrudan sanatın üstünde → hiçbir şey silinmemeli ---
+{
+  const scene = blankScene(240, 180, 60); // koyu sanat
+  for (let y = 0; y < 180; y += 3) fillRect(scene, 0, y, 239, y, 25); // tarama
+  addTextLines(scene, [[80, 80, 160, 100]]);
+  scene.text = { x0: 80, y0: 80, x1: 160, y1: 100 };
+  const domain = letterDomain(scene.lum, scene.rw, scene.rh, "light", scene.text, {
+    cut: 140,
+    paperLum: 250,
+  });
+  check(
+    "sanat üstündeki yazıda silme alanı yok",
+    domain === null,
+    domain ? `alan=${domain.reduce((a, b) => a + b, 0)}` : "null",
+  );
+}
+
+// --- Senaryo 10: beyaz kutu içindeki yazı → yalnızca kutu içi silinir ---
+{
+  const scene = blankScene(240, 180, 40);
+  for (let y = 0; y < 180; y += 3) fillRect(scene, 0, y, 239, y, 20);
+  fillRect(scene, 50, 60, 190, 120, 250); // beyaz caption kutusu
+  addTextLines(scene, [[70, 75, 170, 105]]);
+  scene.text = { x0: 70, y0: 75, x1: 170, y1: 105 };
+  const domain = letterDomain(scene.lum, scene.rw, scene.rh, "light", scene.text, {
+    cut: 140,
+    paperLum: 250,
+  });
+  let outside = 0;
+  let inside = 0;
+  if (domain) {
+    for (let p = 0; p < domain.length; p += 1) {
+      if (!domain[p]) continue;
+      const y = Math.floor(p / scene.rw);
+      const x = p - y * scene.rw;
+      if (x < 50 || x > 190 || y < 60 || y > 120) outside += 1;
+      else inside += 1;
+    }
+  }
+  check(
+    "silme alanı beyaz kutunun dışına taşmadı",
+    !!domain && inside > 100 && outside === 0,
+    `iç=${inside} dış=${outside}`,
   );
 }
 

@@ -1,4 +1,8 @@
-import { findEnclosedBalloon, type TextRect } from "./balloonSegment";
+import {
+  findEnclosedBalloon,
+  letterDomain,
+  type TextRect,
+} from "./balloonSegment";
 import { expandBox } from "./boxes";
 import type { BubbleBox, BubblePoint, BubbleTranslation } from "./types";
 
@@ -450,67 +454,24 @@ function letterOnlyBoundary(
   text: TextRect,
   kind: TextKind,
 ): Boundary {
-  const ink = new Uint8Array(rw * rh);
-  for (let p = 0; p < rw * rh; p += 1) {
-    if (looksLikeInk(lum, p, rw, rh, kind.mode, kind.cut)) ink[p] = 1;
-  }
+  const empty: Boundary = {
+    interior: new Uint8Array(width * height),
+    redzone: new Uint8Array(width * height),
+    stroke: new Uint8Array(width * height),
+    bounds: null,
+    borderBackup: ctx.createImageData(1, 1),
+    backupX: 0,
+    backupY: 0,
+    enclosed: false,
+  };
 
-  const textW = Math.max(1, text.x1 - text.x0 + 1);
-  const textH = Math.max(1, text.y1 - text.y0 + 1);
-  // Gemini textBox son satırı sık kaçırıyor → komşu satırları da kapsa
-  const gx0 = Math.max(0, text.x0 - Math.round(textW * 0.35 + 12));
-  const gy0 = Math.max(0, text.y0 - Math.round(textH * 0.7 + 12));
-  const gx1 = Math.min(rw - 1, text.x1 + Math.round(textW * 0.35 + 12));
-  const gy1 = Math.min(rh - 1, text.y1 + Math.round(textH * 0.7 + 12));
+  const domain = letterDomain(lum, rw, rh, kind.mode, text, {
+    cut: kind.cut,
+    paperLum: luminance(kind.fill.r, kind.fill.g, kind.fill.b),
+  });
+  // Kağıt zemin yok → yazı doğrudan sanatın üstünde. Silmek hasar demek.
+  if (!domain) return empty;
 
-  const maxCompW = Math.min(rw * 0.8, textW * 1.3 + 26);
-  const maxCompH = Math.min(rh * 0.5, textH * 1.3 + 26);
-  const maxCompArea = Math.max(80, Math.floor(rw * rh * 0.05));
-
-  const keep = new Uint8Array(rw * rh);
-  const seen = new Uint8Array(rw * rh);
-  const stack: number[] = [];
-  for (let start = 0; start < rw * rh; start += 1) {
-    if (!ink[start] || seen[start]) continue;
-    const pixels: number[] = [];
-    let minX = rw;
-    let minY = rh;
-    let maxX = -1;
-    let maxY = -1;
-    seen[start] = 1;
-    stack.push(start);
-    while (stack.length) {
-      const p = stack.pop() as number;
-      pixels.push(p);
-      const y = Math.floor(p / rw);
-      const x = p - y * rw;
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-      for (let dy = -1; dy <= 1; dy += 1) {
-        for (let dx = -1; dx <= 1; dx += 1) {
-          if (!dx && !dy) continue;
-          const nx = x + dx;
-          const ny = y + dy;
-          if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
-          const np = ny * rw + nx;
-          if (!ink[np] || seen[np]) continue;
-          seen[np] = 1;
-          stack.push(np);
-        }
-      }
-    }
-    if (maxX - minX + 1 > maxCompW || maxY - minY + 1 > maxCompH) continue;
-    if (pixels.length > maxCompArea || pixels.length < 2) continue;
-    if (maxX < gx0 || minX > gx1 || maxY < gy0 || minY > gy1) continue;
-    for (const p of pixels) keep[p] = 1;
-  }
-
-  // Harfin kendisi silinip antialias halkası kalınca balonda soluk hayalet yazı
-  // görünüyordu. Harfe 2px mesafedeki "tam kağıt olmayan" pikseller de silinir.
-  const grown = dilateMask(dilateMask(keep, rw, rh), rw, rh);
-  const paperLum = luminance(kind.fill.r, kind.fill.g, kind.fill.b);
   const interior = new Uint8Array(width * height);
   let minX = rw;
   let minY = rh;
@@ -518,11 +479,7 @@ function letterOnlyBoundary(
   let maxY = -1;
   for (let y = 0; y < rh; y += 1) {
     for (let x = 0; x < rw; x += 1) {
-      const p = y * rw + x;
-      if (!grown[p]) continue;
-      const halo =
-        kind.mode === "light" ? lum[p] < paperLum - 8 : lum[p] > paperLum + 8;
-      if (!keep[p] && !halo) continue;
+      if (!domain[y * rw + x]) continue;
       interior[(y0 + y) * width + (x0 + x)] = 1;
       if (x < minX) minX = x;
       if (y < minY) minY = y;
@@ -566,6 +523,7 @@ function part3DefineBoundary(
   height: number,
   searchPx: PxBox,
   textPx: PxBox,
+  hintPx: PxBox,
   kind: TextKind,
 ): Boundary {
   const x0 = Math.max(0, Math.floor(searchPx.x));
@@ -605,8 +563,16 @@ function part3DefineBoundary(
   const letterOnly = () =>
     letterOnlyBoundary(ctx, lum, rw, rh, x0, y0, width, height, text, kind);
 
+  // Gemini kutusu şekli belirlemez; yalnızca balonun ölçek sınırıdır.
+  const hint: TextRect = {
+    x0: Math.max(0, Math.min(rw - 1, Math.floor(hintPx.x) - x0)),
+    y0: Math.max(0, Math.min(rh - 1, Math.floor(hintPx.y) - y0)),
+    x1: Math.max(0, Math.min(rw - 1, Math.ceil(hintPx.x + hintPx.w) - x0)),
+    y1: Math.max(0, Math.min(rh - 1, Math.ceil(hintPx.y + hintPx.h) - y0)),
+  };
+
   // 1–2) Balonu gerçekten ara: kapalı kenar bulunamazsa balon yok kabul edilir.
-  const bubble = findEnclosedBalloon(lum, rw, rh, mode, text);
+  const bubble = findEnclosedBalloon(lum, rw, rh, mode, text, hint);
   if (!bubble) return letterOnly();
 
   // 3) Morphological CLOSE — harf deliklerini kapat → tam balon gövdesi
@@ -1754,6 +1720,7 @@ function prepareAllBubbles(
       height,
       searchPx,
       item.textPx,
+      item.bubblePx,
       kind,
     );
     if (!boundary.bounds) continue;
