@@ -368,8 +368,8 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              ***** harf silme → detector → Plan B inpaint. Dikdörtgen yok.
-              Maske balon çizgisine değmez.
+              ***** harf mask → detector → balon-içi temizleme → Telea. Yazı
+              silinmeden çeviri yok; çizgiye ve balon dışına değmez.
             </p>
           </div>
 

@@ -166,8 +166,29 @@ function detectBubbleBoundary(
   samples.sort((a, b) => a - b);
   const median = samples[Math.floor(samples.length / 2)] ?? 220;
   const mode: "light" | "dark" = median >= 110 ? "light" : "dark";
-  const fill: Rgb =
-    mode === "light" ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 };
+  // Paper color from text-region percentiles (not hardcoded white → no gray blocks)
+  const paperSamples: Rgb[] = [];
+  for (let y = ty0; y < ty1; y += 2) {
+    for (let x = tx0; x < tx1; x += 2) {
+      const v = lum[y * rw + x];
+      const paperLike = mode === "light" ? v >= 170 : v <= 70;
+      if (!paperLike) continue;
+      const i = (y * rw + x) * 4;
+      paperSamples.push({ r: data[i], g: data[i + 1], b: data[i + 2] });
+    }
+  }
+  const fill: Rgb = (() => {
+    if (!paperSamples.length) {
+      return mode === "light"
+        ? { r: 255, g: 255, b: 255 }
+        : { r: 8, g: 8, b: 8 };
+    }
+    const rs = paperSamples.map((p) => p.r).sort((a, b) => a - b);
+    const gs = paperSamples.map((p) => p.g).sort((a, b) => a - b);
+    const bs = paperSamples.map((p) => p.b).sort((a, b) => a - b);
+    const mid = Math.floor(paperSamples.length / 2);
+    return { r: rs[mid], g: gs[mid], b: bs[mid] };
+  })();
 
   const ring = 0.1;
   const local = new Uint8Array(rw * rh);
@@ -294,9 +315,9 @@ function detectBubbleBoundary(
   const raw = new Uint8Array(rw * rh);
   for (let i = 0; i < local.length; i += 1) raw[i] = local[i];
 
-  // Strong border redzone: erode 3px from outline so mask NEVER touches balloon line
+  // Strong border redzone (BallonsTranslator-style bubble erode): never touch stroke
   let layer = raw;
-  for (let pass = 0; pass < 3; pass += 1) {
+  for (let pass = 0; pass < 5; pass += 1) {
     const next = new Uint8Array(rw * rh);
     for (let y = 1; y < rh - 1; y += 1) {
       for (let x = 1; x < rw - 1; x += 1) {
@@ -562,7 +583,59 @@ function localPaperColor(
   };
 }
 
-/** Method A: ***** letter erase — ONLY dark glyph pixels, no rectangle fill */
+/** Dilate ink mask 1px so antialias halo also gets erased (still not a rectangle). */
+function dilateInkMask(ink: Uint8Array, rw: number, rh: number): Uint8Array {
+  const out = new Uint8Array(ink);
+  for (let y = 1; y < rh - 1; y += 1) {
+    for (let x = 1; x < rw - 1; x += 1) {
+      const p = y * rw + x;
+      if (ink[p]) continue;
+      if (
+        ink[p - 1] ||
+        ink[p + 1] ||
+        ink[p - rw] ||
+        ink[p + rw] ||
+        ink[p - rw - 1] ||
+        ink[p - rw + 1] ||
+        ink[p + rw - 1] ||
+        ink[p + rw + 1]
+      ) {
+        out[p] = 1;
+      }
+    }
+  }
+  return out;
+}
+
+function buildInkMask(
+  lum: Float32Array,
+  rw: number,
+  rh: number,
+  x0: number,
+  y0: number,
+  width: number,
+  height: number,
+  interior: Uint8Array,
+  redzone: Uint8Array,
+  mode: "light" | "dark",
+  cut: number,
+  dilate: boolean,
+): Uint8Array {
+  const ink = new Uint8Array(rw * rh);
+  for (let p = 0; p < rw * rh; p += 1) {
+    const gx = x0 + (p % rw);
+    const gy = y0 + Math.floor(p / rw);
+    if (!isSafeMaskPixel(gx, gy, width, height, interior, redzone)) continue;
+    if (isBorderStrokePixel(lum, p, rw, x0, y0, width, height, redzone, mode)) {
+      continue;
+    }
+    const isInk = mode === "light" ? lum[p] <= cut : lum[p] >= cut;
+    if (isInk) ink[p] = 1;
+  }
+  return dilate ? dilateInkMask(ink, rw, rh) : ink;
+}
+
+/** Method A: ***** letter erase — ONLY glyph pixels (+1px halo), never a box fill */
 function eraseMethodLetterPatches(
   data: Uint8ClampedArray,
   lum: Float32Array,
@@ -578,35 +651,36 @@ function eraseMethodLetterPatches(
   mode: "light" | "dark",
   cut: number,
 ): number {
-  let wiped = 0;
+  const ink = new Uint8Array(rw * rh);
   for (const pixels of components) {
-    for (const p of pixels) {
-      const gx = x0 + (p % rw);
-      const gy = y0 + Math.floor(p / rw);
-      if (!isSafeMaskPixel(gx, gy, width, height, interior, redzone)) continue;
-      if (isBorderStrokePixel(lum, p, rw, x0, y0, width, height, redzone, mode)) {
-        continue; // 25% border share → skip
-      }
-      // Core ink only (no wide antialias halo → no white blocks)
-      const isInk = mode === "light" ? lum[p] <= cut : lum[p] >= cut;
-      if (!isInk) continue;
-      const paper = localPaperColor(data, lum, p, rw, rh, mode, cut);
-      const i = p * 4;
-      data[i] = paper.r;
-      data[i + 1] = paper.g;
-      data[i + 2] = paper.b;
-      data[i + 3] = 255;
-      wiped += 1;
+    for (const p of pixels) ink[p] = 1;
+  }
+  const mask = dilateInkMask(ink, rw, rh);
+  let wiped = 0;
+  for (let p = 0; p < rw * rh; p += 1) {
+    if (!mask[p]) continue;
+    const gx = x0 + (p % rw);
+    const gy = y0 + Math.floor(p / rw);
+    if (!isSafeMaskPixel(gx, gy, width, height, interior, redzone)) continue;
+    if (isBorderStrokePixel(lum, p, rw, x0, y0, width, height, redzone, mode)) {
+      continue;
     }
+    const paper = localPaperColor(data, lum, p, rw, rh, mode, cut);
+    const i = p * 4;
+    data[i] = paper.r;
+    data[i + 1] = paper.g;
+    data[i + 2] = paper.b;
+    data[i + 3] = 255;
+    wiped += 1;
   }
   return wiped;
 }
 
 /**
- * Method B (different program): local inpaint of leftover ink pixels.
- * Each ink pixel ← average of nearby paper pixels. Never fills a region.
+ * Method B (farklı program): OpenCV Telea-benzeri patch inpaint.
+ * Sadece ink mask piksellerini komşu kağıtla doldurur — dikdörtgen yok.
  */
-function eraseMethodLocalInpaint(
+function eraseMethodTeleaInpaint(
   data: Uint8ClampedArray,
   lum: Float32Array,
   rw: number,
@@ -620,25 +694,112 @@ function eraseMethodLocalInpaint(
   mode: "light" | "dark",
   cut: number,
 ): number {
-  const targets: number[] = [];
+  let mask = buildInkMask(
+    lum,
+    rw,
+    rh,
+    x0,
+    y0,
+    width,
+    height,
+    interior,
+    redzone,
+    mode,
+    mode === "light" ? cut + 10 : cut - 10,
+    true,
+  );
+  // Drop any mask pixel that touches redzone neighborhood
+  for (let p = 0; p < rw * rh; p += 1) {
+    if (!mask[p]) continue;
+    const gx = x0 + (p % rw);
+    const gy = y0 + Math.floor(p / rw);
+    if (!isSafeMaskPixel(gx, gy, width, height, interior, redzone)) mask[p] = 0;
+  }
+
+  let wiped = 0;
+  for (let pass = 0; pass < 8; pass += 1) {
+    const next = new Uint8Array(mask);
+    const updates: Array<{ p: number; r: number; g: number; b: number }> = [];
+    for (let y = 1; y < rh - 1; y += 1) {
+      for (let x = 1; x < rw - 1; x += 1) {
+        const p = y * rw + x;
+        if (!mask[p]) continue;
+        let wr = 0;
+        let wg = 0;
+        let wb = 0;
+        let wsum = 0;
+        for (let dy = -2; dy <= 2; dy += 1) {
+          for (let dx = -2; dx <= 2; dx += 1) {
+            if (!dx && !dy) continue;
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
+            const np = ny * rw + nx;
+            if (mask[np]) continue;
+            const gx = x0 + nx;
+            const gy = y0 + ny;
+            if (!isSafeMaskPixel(gx, gy, width, height, interior, redzone)) {
+              continue;
+            }
+            const dist = Math.hypot(dx, dy);
+            const w = 1 / (dist * dist);
+            const i = np * 4;
+            wr += data[i] * w;
+            wg += data[i + 1] * w;
+            wb += data[i + 2] * w;
+            wsum += w;
+          }
+        }
+        if (wsum < 0.01) continue;
+        updates.push({
+          p,
+          r: Math.round(wr / wsum),
+          g: Math.round(wg / wsum),
+          b: Math.round(wb / wsum),
+        });
+        next[p] = 0;
+      }
+    }
+    if (!updates.length) break;
+    for (const u of updates) {
+      const i = u.p * 4;
+      data[i] = u.r;
+      data[i + 1] = u.g;
+      data[i + 2] = u.b;
+      data[i + 3] = 255;
+      wiped += 1;
+    }
+    mask = next;
+  }
+  return wiped;
+}
+
+/**
+ * Method C (Koharu/Ballons bubble clean): balon İÇİNİ kağıt rengiyle boya.
+ * Shape = flood-fill interior mask (balon şekli). Dikdörtgen / textBox fill YOK.
+ * Redzone (çizgi) asla boyanmaz.
+ */
+function eraseMethodBubbleInteriorFill(
+  data: Uint8ClampedArray,
+  rw: number,
+  rh: number,
+  x0: number,
+  y0: number,
+  width: number,
+  height: number,
+  interior: Uint8Array,
+  redzone: Uint8Array,
+  fill: Rgb,
+): number {
+  let wiped = 0;
   for (let p = 0; p < rw * rh; p += 1) {
     const gx = x0 + (p % rw);
     const gy = y0 + Math.floor(p / rw);
     if (!isSafeMaskPixel(gx, gy, width, height, interior, redzone)) continue;
-    if (isBorderStrokePixel(lum, p, rw, x0, y0, width, height, redzone, mode)) {
-      continue;
-    }
-    const isInk = mode === "light" ? lum[p] <= cut + 8 : lum[p] >= cut - 8;
-    if (isInk) targets.push(p);
-  }
-
-  let wiped = 0;
-  for (const p of targets) {
-    const paper = localPaperColor(data, lum, p, rw, rh, mode, cut);
     const i = p * 4;
-    data[i] = paper.r;
-    data[i + 1] = paper.g;
-    data[i + 2] = paper.b;
+    data[i] = fill.r;
+    data[i + 1] = fill.g;
+    data[i + 2] = fill.b;
     data[i + 3] = 255;
     wiped += 1;
   }
@@ -658,19 +819,6 @@ function detectRemainingText(
   redzone: Uint8Array,
   mode: "light" | "dark",
 ): { leftover: boolean; inkPixels: number; components: number } {
-  const cut = inkThreshold(
-    lum,
-    rw,
-    rh,
-    x0,
-    y0,
-    width,
-    height,
-    interior,
-    redzone,
-    mode,
-    true,
-  );
   const comps = detectLetterPatches(
     lum,
     rw,
@@ -686,30 +834,31 @@ function detectRemainingText(
   );
   let inkPixels = 0;
   for (const c of comps) inkPixels += c.length;
-  // Ignore tiny noise
-  const leftover = comps.length >= 1 && inkPixels >= 12;
+  const leftover = comps.length >= 1 && inkPixels >= 10;
   return { leftover, inkPixels, components: comps.length };
 }
 
 /**
- * Full erase chain:
- * A ***** letter erase → detector → B local-inpaint (farklı program) → detector…
- * Çeviri ancak detector temiz derse (veya denemeler bitince) eklenir.
+ * Endüstri zinciri (Koharu / BallonsTranslator / manga-image-translator):
+ * A ***** harf mask → detector → C balon-içi paper fill (şekil maskesi) →
+ * detector → B Telea inpaint → detector.
+ * Çeviri YALNIZCA detector temiz derse yazılır (zorunlu C sonrası genelde temiz).
  */
 function eraseTextGuarded(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
-  textPx: PxBox,
+  cleanRegion: PxBox,
   interior: Uint8Array,
   redzone: Uint8Array,
   mode: "light" | "dark",
+  fill: Rgb,
 ): boolean {
-  const pad = Math.max(1, Math.min(textPx.w, textPx.h) * 0.015);
-  const x0 = Math.max(0, Math.floor(textPx.x - pad));
-  const y0 = Math.max(0, Math.floor(textPx.y - pad));
-  const x1 = Math.min(width, Math.ceil(textPx.x + textPx.w + pad));
-  const y1 = Math.min(height, Math.ceil(textPx.y + textPx.h + pad));
+  // Clean whole bubble interior bbox (not tiny textBox) — leftover Hangul outside box goes away
+  const x0 = Math.max(0, Math.floor(cleanRegion.x));
+  const y0 = Math.max(0, Math.floor(cleanRegion.y));
+  const x1 = Math.min(width, Math.ceil(cleanRegion.x + cleanRegion.w));
+  const y1 = Math.min(height, Math.ceil(cleanRegion.y + cleanRegion.h));
   const rw = x1 - x0;
   const rh = y1 - y0;
   if (rw < 2 || rh < 2) return false;
@@ -750,79 +899,6 @@ function eraseTextGuarded(
   };
 
   // 1) Method A — ***** harf silme
-  let { lum, cut } = (() => {
-    const L = readRegionLum(data, rw * rh);
-    const C = inkThreshold(
-      L,
-      rw,
-      rh,
-      x0,
-      y0,
-      width,
-      height,
-      interior,
-      redzone,
-      mode,
-      false,
-    );
-    const comps = detectLetterPatches(
-      L,
-      rw,
-      rh,
-      x0,
-      y0,
-      width,
-      height,
-      interior,
-      redzone,
-      mode,
-      false,
-    );
-    eraseMethodLetterPatches(
-      data,
-      L,
-      comps,
-      rw,
-      rh,
-      x0,
-      y0,
-      width,
-      height,
-      interior,
-      redzone,
-      mode,
-      C,
-    );
-    return { lum: L, cut: C };
-  })();
-
-  // 2) Detector → if leftover, Method B (farklı silme)
-  for (let round = 0; round < 3; round += 1) {
-    const d = runDetect();
-    lum = d.lum;
-    cut = d.cut;
-    if (!d.report.leftover) {
-      ctx.putImageData(img, x0, y0);
-      return true; // clean — çeviriye geçilebilir
-    }
-    // Farklı program: local inpaint
-    eraseMethodLocalInpaint(
-      data,
-      lum,
-      rw,
-      rh,
-      x0,
-      y0,
-      width,
-      height,
-      interior,
-      redzone,
-      mode,
-      cut,
-    );
-  }
-
-  // Last try: sensitive ***** again
   {
     const L = readRegionLum(data, rw * rh);
     const C = inkThreshold(
@@ -836,7 +912,7 @@ function eraseTextGuarded(
       interior,
       redzone,
       mode,
-      true,
+      false,
     );
     const comps = detectLetterPatches(
       L,
@@ -849,7 +925,7 @@ function eraseTextGuarded(
       interior,
       redzone,
       mode,
-      true,
+      false,
     );
     eraseMethodLetterPatches(
       data,
@@ -867,6 +943,66 @@ function eraseTextGuarded(
       C,
     );
   }
+
+  let d = runDetect();
+  if (!d.report.leftover) {
+    ctx.putImageData(img, x0, y0);
+    return true;
+  }
+
+  // 2) Method C — balon içi paper restore (hedef görsellerdeki temiz balon)
+  eraseMethodBubbleInteriorFill(
+    data,
+    rw,
+    rh,
+    x0,
+    y0,
+    width,
+    height,
+    interior,
+    redzone,
+    fill,
+  );
+
+  d = runDetect();
+  if (!d.report.leftover) {
+    ctx.putImageData(img, x0, y0);
+    return true;
+  }
+
+  // 3) Method B — Telea inpaint (kalan ink)
+  for (let round = 0; round < 2; round += 1) {
+    d = runDetect();
+    if (!d.report.leftover) break;
+    eraseMethodTeleaInpaint(
+      data,
+      d.lum,
+      rw,
+      rh,
+      x0,
+      y0,
+      width,
+      height,
+      interior,
+      redzone,
+      mode,
+      d.cut,
+    );
+  }
+
+  // Force: bubble fill again then accept (border still protected)
+  eraseMethodBubbleInteriorFill(
+    data,
+    rw,
+    rh,
+    x0,
+    y0,
+    width,
+    height,
+    interior,
+    redzone,
+    fill,
+  );
 
   const final = runDetect();
   ctx.putImageData(img, x0, y0);
@@ -936,33 +1072,40 @@ function condenseToFit(
   return best;
 }
 
-/** STEP: çeviriyi balon sınırları içine yaz */
+/**
+ * STEP: çeviriyi balon sınırları içine yaz.
+ * Offscreen çiz → sadece interior∖redzone pikselleri composite (balon dışına çıkmaz).
+ */
 function writeTranslationInsideBubble(
   ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
   text: string,
   original: string,
   textPx: PxBox,
   bounds: PxBox,
   mode: "light" | "dark",
+  interior: Uint8Array,
+  redzone: Uint8Array,
 ) {
   const origLines = estimateLineCount(original || text);
-  const targetFont = Math.max(12, Math.min(72, (textPx.h / origLines) * 0.8));
+  const targetFont = Math.max(12, Math.min(64, (Math.min(textPx.h, bounds.h) / origLines) * 0.72));
 
-  const padX = Math.max(4, bounds.w * 0.14);
-  const padY = Math.max(4, bounds.h * 0.14);
+  const padX = Math.max(6, bounds.w * 0.16);
+  const padY = Math.max(6, bounds.h * 0.16);
   const x = bounds.x + padX;
   const y = bounds.y + padY;
   const w = Math.max(8, bounds.w - padX * 2);
   const h = Math.max(8, bounds.h - padY * 2);
 
-  const minFont = Math.max(11, targetFont * 0.55);
+  const minFont = Math.max(10, targetFont * 0.5);
   const fitted = condenseToFit(ctx, text, w, h, minFont);
 
   let low = minFont;
   let high = targetFont;
   let bestSize = minFont;
   let bestLines = wrapText(ctx, fitted, w);
-  let lineHeight = bestSize * 1.05;
+  let lineHeight = bestSize * 1.08;
 
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
@@ -975,22 +1118,56 @@ function writeTranslationInsideBubble(
     } else high = mid - 1;
   }
 
-  ctx.font = comicFont(bestSize);
-  ctx.fillStyle = mode === "light" ? "#111111" : "#ffffff";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
+  const layer = document.createElement("canvas");
+  layer.width = width;
+  layer.height = height;
+  const lctx = layer.getContext("2d");
+  if (!lctx) return;
+
+  lctx.font = comicFont(bestSize);
+  lctx.fillStyle = mode === "light" ? "#111111" : "#ffffff";
+  lctx.textAlign = "center";
+  lctx.textBaseline = "middle";
 
   const totalHeight = bestLines.length * lineHeight;
-  // Center of refined bubble interior (not old wrong text box)
   const cx = bounds.x + bounds.w / 2;
   const cy = bounds.y + bounds.h / 2;
   let cursorY = cy - totalHeight / 2 + lineHeight / 2;
   const drawX = Math.min(Math.max(cx, x + 2), x + w - 2);
 
   for (const line of bestLines) {
-    ctx.fillText(line, drawX, cursorY, w);
+    lctx.fillText(line, drawX, cursorY, w);
     cursorY += lineHeight;
   }
+
+  // Composite only inside safe bubble interior — prevents overflow / border damage
+  const bx0 = Math.max(0, Math.floor(bounds.x - 2));
+  const by0 = Math.max(0, Math.floor(bounds.y - 2));
+  const bx1 = Math.min(width, Math.ceil(bounds.x + bounds.w + 2));
+  const by1 = Math.min(height, Math.ceil(bounds.y + bounds.h + 2));
+  const bw = bx1 - bx0;
+  const bh = by1 - by0;
+  if (bw < 1 || bh < 1) return;
+
+  const src = lctx.getImageData(bx0, by0, bw, bh);
+  const dst = ctx.getImageData(bx0, by0, bw, bh);
+  for (let y = 0; y < bh; y += 1) {
+    for (let x = 0; x < bw; x += 1) {
+      const li = (y * bw + x) * 4;
+      if (src.data[li + 3] < 20) continue;
+      const gx = bx0 + x;
+      const gy = by0 + y;
+      const g = gy * width + gx;
+      if (!interior[g] || redzone[g]) continue;
+      // Alpha blend text over cleaned bubble
+      const a = src.data[li + 3] / 255;
+      dst.data[li] = Math.round(src.data[li] * a + dst.data[li] * (1 - a));
+      dst.data[li + 1] = Math.round(src.data[li + 1] * a + dst.data[li + 1] * (1 - a));
+      dst.data[li + 2] = Math.round(src.data[li + 2] * a + dst.data[li + 2] * (1 - a));
+      dst.data[li + 3] = 255;
+    }
+  }
+  ctx.putImageData(dst, bx0, by0);
 }
 
 function drawDebug(
@@ -1026,13 +1203,12 @@ function drawDebug(
 }
 
 /**
- * Zincir:
- * 1) Yazı algıla
- * 2) Balon algıla
- * 3) Balon sınırı algıla (redzone = çizgi, maske değmez)
- * 4) ***** harf silme (A)
- * 5) Detector → kalan yazı varsa farklı silme (B: local inpaint)
- * 6) Temizse çeviriyi yaz
+ * Zincir (Koharu / BallonsTranslator taklidi, tarayıcıda):
+ * 1) Yazı + balon kutuları
+ * 2) Balon sınırı + redzone (çizgi dokunulmaz)
+ * 3) ***** harf mask → detector → balon-içi fill → Telea
+ * 4) Detector temiz değilse çeviri YAZILMAZ
+ * 5) Temizse çeviri interior mask içine composite
  */
 export async function renderTranslatedPage(
   imageDataUrl: string,
@@ -1065,18 +1241,20 @@ export async function renderTranslatedPage(
     let seg = detectBubbleBoundary(ctx, width, height, bubblePx, textPx);
     if (!seg.bounds) continue;
 
-    // Silme zinciri (dikdörtgen yok) + detector + plan B
-    eraseTextGuarded(
+    // Silme bölgesi = balon interior bounds (textBox dikdörtgeni değil)
+    const cleanRegion = seg.bounds;
+    const clean = eraseTextGuarded(
       ctx,
       width,
       height,
-      textPx,
+      cleanRegion,
       seg.interior,
       seg.redzone,
       seg.mode,
+      seg.fill,
     );
 
-    // Sınır tekrar (redzone taze)
+    // Sınır tekrar
     seg = detectBubbleBoundary(ctx, width, height, bubblePx, textPx);
     if (!seg.bounds) continue;
 
@@ -1084,37 +1262,27 @@ export async function renderTranslatedPage(
       drawDebug(ctx, width, height, bubblePx, textPx, seg.interior, seg.redzone);
     }
 
-    const place: PxBox = {
-      x: Math.max(seg.bounds.x, textPx.x),
-      y: Math.max(seg.bounds.y, textPx.y),
-      w:
-        Math.min(seg.bounds.x + seg.bounds.w, textPx.x + textPx.w) -
-        Math.max(seg.bounds.x, textPx.x),
-      h:
-        Math.min(seg.bounds.y + seg.bounds.h, textPx.y + textPx.h) -
-        Math.max(seg.bounds.y, textPx.y),
-    };
-    if (place.w < 8 || place.h < 8) {
-      place.x = seg.bounds.x;
-      place.y = seg.bounds.y;
-      place.w = seg.bounds.w;
-      place.h = seg.bounds.h;
-    }
+    // En önemlisi: yazı silinmeden çeviriye geçme
+    if (!clean) continue;
 
     writeTranslationInsideBubble(
       ctx,
+      width,
+      height,
       bubble.translated,
       bubble.original,
       textPx,
-      place,
+      seg.bounds,
       seg.mode,
+      seg.interior,
+      seg.redzone,
     );
     painted += 1;
   }
 
   if (painted === 0) {
     throw new Error(
-      "Baloncuk/yazı zinciri başarısız. Sayfayı tekrar çevirmeyi dene.",
+      "Yazı temizlenemedi veya balon algılanamadı. Temiz orijinal yükleyip tekrar dene.",
     );
   }
 
