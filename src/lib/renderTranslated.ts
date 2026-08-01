@@ -158,8 +158,87 @@ function canEraseAt(
   if (gx < 0 || gy < 0 || gx >= width || gy >= height) return false;
   const g = gy * width + gx;
   if (!interior[g]) return false;
-  if (isProtected(gx, gy, width, height, redzone, stroke, 2)) return false;
+  // pad=1: küçük balonda pad=2 interior'ı sıfırlıyordu → silme yok + "temiz" yalanı
+  if (isProtected(gx, gy, width, height, redzone, stroke, 1)) return false;
   return true;
+}
+
+function looksLikeInk(
+  lum: Float32Array,
+  p: number,
+  rw: number,
+  rh: number,
+  mode: "light" | "dark",
+  cut: number,
+): boolean {
+  const v = lum[p];
+  const core = mode === "light" ? v <= cut : v >= cut;
+  if (!core) return false;
+  // Yerel kontrast: kağıdı beyaz dikdörtgen diye silme
+  const y = Math.floor(p / rw);
+  const x = p - y * rw;
+  let paper = 0;
+  let n = 0;
+  for (let dy = -3; dy <= 3; dy += 1) {
+    for (let dx = -3; dx <= 3; dx += 1) {
+      if (!dx && !dy) continue;
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
+      const nv = lum[ny * rw + nx];
+      const isPaper = mode === "light" ? nv > cut + 25 : nv < cut - 25;
+      if (isPaper) {
+        paper += nv;
+        n += 1;
+      }
+    }
+  }
+  if (!n) return mode === "light" ? v < 110 : v > 145;
+  const paperAvg = paper / n;
+  return mode === "light" ? paperAvg - v >= 28 : v - paperAvg >= 28;
+}
+
+/** Ham mürekkep sayısı — solidRect filtresi YOK (kalan İngilizceyi gizlemesin) */
+function countRawInkPixels(
+  data: Uint8ClampedArray,
+  rw: number,
+  rh: number,
+  x0: number,
+  y0: number,
+  width: number,
+  height: number,
+  redzone: Uint8Array,
+  stroke: Uint8Array,
+  kind: TextKind,
+): number {
+  const lum = new Float32Array(rw * rh);
+  for (let p = 0, i = 0; p < rw * rh; p += 1, i += 4) {
+    lum[p] = luminance(data[i], data[i + 1], data[i + 2]);
+  }
+  let n = 0;
+  for (let p = 0; p < rw * rh; p += 1) {
+    const gx = x0 + (p % rw);
+    const gy = y0 + Math.floor(p / rw);
+    if (gx < 0 || gy < 0 || gx >= width || gy >= height) continue;
+    const g = gy * width + gx;
+    if (redzone[g] || stroke[g]) continue;
+    if (isProtected(gx, gy, width, height, redzone, stroke, 1)) continue;
+    if (looksLikeInk(lum, p, rw, rh, kind.mode, kind.cut)) n += 1;
+  }
+  return n;
+}
+
+function sameLanguageLeak(original: string, translated: string): boolean {
+  const a = original.replace(/\s+/g, " ").trim().toLowerCase();
+  const b = translated.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!a || !b) return true;
+  if (a === b) return true;
+  // Çeviri hâlâ büyük ölçüde kaynak metin
+  const aw = new Set(a.split(" ").filter((w) => w.length > 2));
+  let hit = 0;
+  for (const w of b.split(" ")) if (aw.has(w)) hit += 1;
+  const bw = b.split(" ").filter((w) => w.length > 2).length || 1;
+  return hit / bw >= 0.7;
 }
 
 /** PART 2 — Yazı türünü anlama */
@@ -398,9 +477,9 @@ function part3DefineBoundary(
     }
   }
 
-  // PART 7 prep: erode interior → redzone band (never erase here)
+  // PART 7 prep: hafif erode (3px) — 6px küçük balonu öldürüyordu
   let layer = raw;
-  for (let pass = 0; pass < 6; pass += 1) {
+  for (let pass = 0; pass < 3; pass += 1) {
     const next = new Uint8Array(rw * rh);
     for (let y = 1; y < rh - 1; y += 1) {
       for (let x = 1; x < rw - 1; x += 1) {
@@ -437,14 +516,35 @@ function part3DefineBoundary(
     }
   }
 
-  // Expand redzone to cover stroke neighborhood
+  // Interior çok küçüldüyse textBox içi soft zone (harf silme için; dikdörtgen boyama değil)
+  let interiorCount = 0;
+  for (let i = 0; i < interior.length; i += 1) if (interior[i]) interiorCount += 1;
+  const textArea = Math.max(1, textPx.w * textPx.h);
+  if (interiorCount < textArea * 0.15) {
+    const cx = textPx.x + textPx.w * 0.5;
+    const cy = textPx.y + textPx.h * 0.5;
+    const rx = textPx.w * 0.4;
+    const ry = textPx.h * 0.4;
+    for (let y = Math.floor(textPx.y); y < textPx.y + textPx.h; y += 1) {
+      for (let x = Math.floor(textPx.x); x < textPx.x + textPx.w; x += 1) {
+        if (x < 0 || y < 0 || x >= width || y >= height) continue;
+        const g = y * width + x;
+        if (stroke[g] || redzone[g]) continue;
+        const nx = (x - cx) / rx;
+        const ny = (y - cy) / ry;
+        if (nx * nx + ny * ny <= 1) interior[g] = 1;
+      }
+    }
+  }
+
+  // Stroke komşuluğu redzone (1px — balon çizgisi koru, yazıyı yutma)
   const redExpand = new Uint8Array(redzone);
   for (let y = y0; y < y1; y += 1) {
     for (let x = x0; x < x1; x += 1) {
       const g = y * width + x;
       if (!stroke[g] && !redzone[g]) continue;
-      for (let dy = -2; dy <= 2; dy += 1) {
-        for (let dx = -2; dx <= 2; dx += 1) {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
           const nx = x + dx;
           const ny = y + dy;
           if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
@@ -507,10 +607,11 @@ function part4RecognizeTextInk(
     lum[p] = luminance(data[i], data[i + 1], data[i + 2]);
   }
 
+  // sensitive sadece biraz gevşetir — kağıdı yutacak kadar değil (beyaz dikdörtgen önlemi)
   const cut = sensitive
     ? kind.mode === "light"
-      ? Math.min(160, kind.cut + 18)
-      : Math.max(95, kind.cut - 18)
+      ? Math.min(138, kind.cut + 8)
+      : Math.max(120, kind.cut - 8)
     : kind.cut;
 
   const ink = new Uint8Array(rw * rh);
@@ -518,8 +619,7 @@ function part4RecognizeTextInk(
     const gx = x0 + (p % rw);
     const gy = y0 + Math.floor(p / rw);
     if (!canEraseAt(gx, gy, width, height, interior, redzone, stroke)) continue;
-    const isInk = kind.mode === "light" ? lum[p] <= cut : lum[p] >= cut;
-    if (isInk) ink[p] = 1;
+    if (looksLikeInk(lum, p, rw, rh, kind.mode, cut)) ink[p] = 1;
   }
 
   // Connected components — reject giant solid blobs (rect artifacts)
@@ -807,6 +907,24 @@ function eraseUntilClean(
   const rh = ry1 - ry0;
   if (rw < 2 || rh < 2) return false;
 
+  const beforeImg = ctx.getImageData(rx0, ry0, rw, rh);
+  const inkBefore = countRawInkPixels(
+    beforeImg.data,
+    rw,
+    rh,
+    rx0,
+    ry0,
+    width,
+    height,
+    redzone,
+    stroke,
+    kind,
+  );
+  // TextBox'ta yazı yoksa veya algı yoksa çeviri yazma (İngilizce üstüne binmesin)
+  if (inkBefore < 12) return false;
+
+  let wipedTotal = 0;
+
   for (let round = 0; round < 5; round += 1) {
     const img = ctx.getImageData(rx0, ry0, rw, rh);
     const { data } = img;
@@ -829,9 +947,9 @@ function eraseUntilClean(
 
     // PART 6
     if (round === 0 || round === 2 || round === 4) {
-      part6EraseLetters(data, mask, rw, rh, kind);
+      wipedTotal += part6EraseLetters(data, mask, rw, rh, kind);
     } else {
-      part6TeleaPass(
+      wipedTotal += part6TeleaPass(
         data,
         mask,
         rw,
@@ -851,10 +969,9 @@ function eraseUntilClean(
     // PART 7 + 10 — sınır zorunlu geri
     part10RepairBoundaryWithWidth(ctx, boundary, width);
 
-    // PART 9 — kalan yazı + sınır
-    part10RepairBoundaryWithWidth(ctx, boundary, width);
+    // PART 9 — ham mürekkep (solidRect filtresi yok → kalan EN görünür)
     const after = ctx.getImageData(rx0, ry0, rw, rh);
-    const inkMask = part4RecognizeTextInk(
+    const leftover = countRawInkPixels(
       after.data,
       rw,
       rh,
@@ -862,18 +979,18 @@ function eraseUntilClean(
       ry0,
       width,
       height,
-      interior,
       redzone,
       stroke,
       kind,
-      true,
     );
-    let leftover = 0;
-    for (let p = 0; p < inkMask.length; p += 1) if (inkMask[p]) leftover += 1;
 
-    // Border damage vs snapshot
     const bak = boundary.borderBackup;
-    const full = ctx.getImageData(boundary.backupX, boundary.backupY, bak.width, bak.height);
+    const full = ctx.getImageData(
+      boundary.backupX,
+      boundary.backupY,
+      bak.width,
+      bak.height,
+    );
     let borderDamage = 0;
     let borderChecked = 0;
     for (let y = 0; y < bak.height; y += 1) {
@@ -897,16 +1014,17 @@ function eraseUntilClean(
 
     const borderOk =
       borderChecked === 0 || borderDamage / borderChecked <= 0.01;
-    if (leftover <= 8 && borderOk) {
+    const erasedRatio = wipedTotal / Math.max(1, inkBefore);
+    // %99: neredeyse tüm mürekkep gitmiş + gerçekten silme yapılmış + sınır sağlam
+    if (leftover <= 8 && erasedRatio >= 0.85 && borderOk && wipedTotal >= 10) {
       part10RepairBoundaryWithWidth(ctx, boundary, width);
       return true;
     }
   }
 
   part10RepairBoundaryWithWidth(ctx, boundary, width);
-  // Final ink check
   const finalImg = ctx.getImageData(rx0, ry0, rw, rh);
-  const finalMask = part4RecognizeTextInk(
+  const leftover = countRawInkPixels(
     finalImg.data,
     rw,
     rh,
@@ -914,15 +1032,12 @@ function eraseUntilClean(
     ry0,
     width,
     height,
-    interior,
     redzone,
     stroke,
     kind,
-    true,
   );
-  let leftover = 0;
-  for (let p = 0; p < finalMask.length; p += 1) if (finalMask[p]) leftover += 1;
-  return leftover <= 8;
+  const erasedRatio = wipedTotal / Math.max(1, inkBefore);
+  return leftover <= 8 && erasedRatio >= 0.85 && wipedTotal >= 10;
 }
 
 function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number) {
@@ -1190,8 +1305,8 @@ export async function renderTranslatedPage(
       );
     }
 
-    // PART 11 — yazı silinmeden çeviri YOK
-    if (!clean) {
+    // PART 11 — yazı silinmeden / İngilizce sızıntısıyla çeviri YOK
+    if (!clean || sameLanguageLeak(bubble.original, bubble.translated)) {
       skippedDirty += 1;
       continue;
     }

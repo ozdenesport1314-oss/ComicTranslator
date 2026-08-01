@@ -368,8 +368,8 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              PART zinciri: balon → tür → sınır → ***** harf silme → sınır
-              koruma/onarma → hasar kontrolü. Temiz değilse çeviri yazılmaz.
+              Harf silme + yerel kontrast (beyaz kutu yok). Kalan yazı / aynı dil
+              sızıntısı varsa çeviri yazılmaz.
             </p>
           </div>
 

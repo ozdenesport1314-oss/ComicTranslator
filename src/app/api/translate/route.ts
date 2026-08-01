@@ -192,8 +192,10 @@ Kurallar:
 1) Koordinatlar 0–1000 tam sayı (x,y sol-üst; w,h boyut).
 2) textBox ⊆ bubbleBox (taşma yok).
 3) Hedef dil: ${targetLanguage}.
-4) translated kısa, vurucu, balona sığar; uzarsa anlamı koruyarak kısalt.
-5) Uydurma balon/yazı yok. Floating yazıysa bubbleBox ≈ textBox + küçük pay.
+4) translated MUTLAKA ${targetLanguage} olsun — original ile aynı dilde kopyalama YASAK.
+5) translated kısa, vurucu, balona sığar; uzarsa anlamı koruyarak kısalt.
+6) Uydurma balon/yazı yok. Floating yazıysa bubbleBox ≈ textBox + küçük pay.
+7) textBox yazının TÜM satırlarını kapsasın (eksik kutu silmeyi bozar).
 
 SADECE JSON:
 {
