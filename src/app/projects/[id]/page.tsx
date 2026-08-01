@@ -368,8 +368,8 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              Önce balondaki orijinal harfler silinir, sonra çeviri yazılır.
-              Çeviri altına beyaz katman yok.
+              Orijinal silinir → Türkçe yazılır. Sınır onarımı artık İngilizceyi
+              geri yapıştırmaz.
             </p>
           </div>
 

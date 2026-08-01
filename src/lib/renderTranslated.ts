@@ -860,15 +860,18 @@ function part6TeleaPass(
 }
 
 /**
- * PART 7 + PART 10 — Sınırı zorunlu koruma ve geri onarma.
- * Redzone/stroke (+1px halo) orijinal snapshot’tan geri yüklenir.
+ * PART 10 — Sadece balon ÇİZGİSİNİ geri yükle.
+ *
+ * Eski hali redzone+halo’yu da restore ediyordu → snapshot’taki ORİJİNAL
+ * İngilizce, silinen alanın / Türkçe çevirinin ÜSTÜNE geri yapışıyordu.
+ * Bu yüzden: altta Türkçe, üstte İngilizce + beyaz kare.
  */
 function part10RepairBoundaryWithWidth(
   ctx: CanvasRenderingContext2D,
   boundary: Boundary,
   width: number,
 ): void {
-  const { borderBackup, backupX, backupY, redzone, stroke } = boundary;
+  const { borderBackup, backupX, backupY, stroke, interior } = boundary;
   const rw = borderBackup.width;
   const rh = borderBackup.height;
   const cur = ctx.getImageData(backupX, backupY, rw, rh);
@@ -877,24 +880,19 @@ function part10RepairBoundaryWithWidth(
       const gx = backupX + x;
       const gy = backupY + y;
       const g = gy * width + gx;
-      // Restore redzone, stroke, and 1px halo (balon hasarı geri al)
-      let restore = !!(redzone[g] || stroke[g]);
-      if (!restore) {
-        for (let dy = -1; dy <= 1 && !restore; dy += 1) {
-          for (let dx = -1; dx <= 1; dx += 1) {
-            const nx = gx + dx;
-            const ny = gy + dy;
-            if (nx < 0 || ny < 0 || nx >= width) continue;
-            const ng = ny * width + nx;
-            if (redzone[ng] || stroke[ng]) restore = true;
-          }
-        }
-      }
-      if (!restore) continue;
+      // Interior’daki yazı alanına ASLA dokunma
+      if (interior[g]) continue;
+      if (!stroke[g]) continue;
       const i = (y * rw + x) * 4;
-      cur.data[i] = borderBackup.data[i];
-      cur.data[i + 1] = borderBackup.data[i + 1];
-      cur.data[i + 2] = borderBackup.data[i + 2];
+      // Sadece gerçek koyu çizgi pikseli (yazı/kağıt geri gelmesin)
+      const br = borderBackup.data[i];
+      const bg = borderBackup.data[i + 1];
+      const bb = borderBackup.data[i + 2];
+      const v = 0.299 * br + 0.587 * bg + 0.114 * bb;
+      if (v > 120) continue;
+      cur.data[i] = br;
+      cur.data[i + 1] = bg;
+      cur.data[i + 2] = bb;
       cur.data[i + 3] = borderBackup.data[i + 3];
     }
   }
@@ -1582,8 +1580,7 @@ export async function renderTranslatedPage(
       boundary.redzone,
       boundary.stroke,
     );
-    // Keep border pristine after text draw
-    part10RepairBoundaryWithWidth(ctx, boundary, width);
+    // Çeviriden SONRA part10 YOK — İngilizceyi geri yapıştırır
     painted += 1;
   }
 
