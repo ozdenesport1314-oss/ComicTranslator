@@ -368,8 +368,8 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              ***** harf mask → detector → balon-içi temizleme → Telea. Yazı
-              silinmeden çeviri yok; çizgiye ve balon dışına değmez.
+              PART zinciri: balon → tür → sınır → ***** harf silme → sınır
+              koruma/onarma → hasar kontrolü. Temiz değilse çeviri yazılmaz.
             </p>
           </div>
 
