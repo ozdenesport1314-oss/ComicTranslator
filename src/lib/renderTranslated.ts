@@ -12,8 +12,11 @@ import type { BubbleBox, BubbleTranslation } from "./types";
  * PART 7  Sınırı zorunlu koruma (redzone’a yazma yasağı)
  * PART 9  Hasar kontrolü (kalan yazı + sınır bozulması)
  * PART 10 Sınırı geri onarma (snapshot restore)
- * PART 11 Çeviri — yalnızca PART 9 %99 temiz derse
+ * PART 11 Çeviri — silme skoru ≥ CLEAN_THRESHOLD (test: %90, hedef: %99)
  */
+
+/** Test eşiği %90 — ileride %99'a çekilecek */
+const CLEAN_THRESHOLD = 0.9;
 
 export type RenderOptions = {
   showRedzone?: boolean;
@@ -883,8 +886,160 @@ function part10RepairBoundaryWithWidth(
 }
 
 /**
- * Bağlantı: PART 4→6→7→9 loop → 10 → clean?
- * Dikdörtgen / balon boyama YOK.
+ * Zincir 3 — ince ayar: nokta/çizgi kadar kalanları spot sil
+ * (BallonsTranslator spot-heal / residual dilate benzeri)
+ */
+function part6FineSpotErase(
+  data: Uint8ClampedArray,
+  rw: number,
+  rh: number,
+  x0: number,
+  y0: number,
+  width: number,
+  height: number,
+  interior: Uint8Array,
+  redzone: Uint8Array,
+  stroke: Uint8Array,
+  kind: TextKind,
+): number {
+  const lum = new Float32Array(rw * rh);
+  for (let p = 0, i = 0; p < rw * rh; p += 1, i += 4) {
+    lum[p] = luminance(data[i], data[i + 1], data[i + 2]);
+  }
+
+  const cut =
+    kind.mode === "light"
+      ? Math.min(145, kind.cut + 12)
+      : Math.max(115, kind.cut - 12);
+
+  const ink = new Uint8Array(rw * rh);
+  for (let p = 0; p < rw * rh; p += 1) {
+    const gx = x0 + (p % rw);
+    const gy = y0 + Math.floor(p / rw);
+    if (!canEraseAt(gx, gy, width, height, interior, redzone, stroke)) continue;
+    if (looksLikeInk(lum, p, rw, rh, kind.mode, cut)) ink[p] = 1;
+  }
+
+  // Tiny components only (dots / stroke crumbs), max 48px
+  const labels = new Int32Array(rw * rh).fill(-1);
+  const keep = new Uint8Array(rw * rh);
+  const stack: number[] = [];
+  for (let start = 0; start < rw * rh; start += 1) {
+    if (!ink[start] || labels[start] >= 0) continue;
+    const pixels: number[] = [];
+    labels[start] = 1;
+    stack.push(start);
+    while (stack.length) {
+      const p = stack.pop() as number;
+      pixels.push(p);
+      const y = Math.floor(p / rw);
+      const x = p - y * rw;
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          if (!dx && !dy) continue;
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
+          const np = ny * rw + nx;
+          if (!ink[np] || labels[np] >= 0) continue;
+          labels[np] = 1;
+          stack.push(np);
+        }
+      }
+    }
+    if (pixels.length >= 1 && pixels.length <= 48) {
+      for (const p of pixels) keep[p] = 1;
+    }
+  }
+
+  // 1px dilate crumbs
+  const mask = new Uint8Array(keep);
+  for (let y = 1; y < rh - 1; y += 1) {
+    for (let x = 1; x < rw - 1; x += 1) {
+      const p = y * rw + x;
+      if (keep[p]) continue;
+      if (keep[p - 1] || keep[p + 1] || keep[p - rw] || keep[p + rw]) {
+        const gx = x0 + x;
+        const gy = y0 + y;
+        if (canEraseAt(gx, gy, width, height, interior, redzone, stroke)) {
+          mask[p] = 1;
+        }
+      }
+    }
+  }
+
+  return part6EraseLetters(data, mask, rw, rh, kind);
+}
+
+function measureEraseScore(
+  ctx: CanvasRenderingContext2D,
+  rx0: number,
+  ry0: number,
+  rw: number,
+  rh: number,
+  width: number,
+  height: number,
+  redzone: Uint8Array,
+  stroke: Uint8Array,
+  kind: TextKind,
+  inkBefore: number,
+  boundary: Boundary,
+): { score: number; leftover: number; borderOk: boolean } {
+  part10RepairBoundaryWithWidth(ctx, boundary, width);
+  const after = ctx.getImageData(rx0, ry0, rw, rh);
+  const leftover = countRawInkPixels(
+    after.data,
+    rw,
+    rh,
+    rx0,
+    ry0,
+    width,
+    height,
+    redzone,
+    stroke,
+    kind,
+  );
+
+  const bak = boundary.borderBackup;
+  const full = ctx.getImageData(
+    boundary.backupX,
+    boundary.backupY,
+    bak.width,
+    bak.height,
+  );
+  let borderDamage = 0;
+  let borderChecked = 0;
+  for (let y = 0; y < bak.height; y += 1) {
+    for (let x = 0; x < bak.width; x += 1) {
+      const gx = boundary.backupX + x;
+      const gy = boundary.backupY + y;
+      const g = gy * width + gx;
+      if (!redzone[g] && !stroke[g]) continue;
+      borderChecked += 1;
+      const i = (y * bak.width + x) * 4;
+      const delta =
+        Math.abs(full.data[i] - bak.data[i]) +
+        Math.abs(full.data[i + 1] - bak.data[i + 1]) +
+        Math.abs(full.data[i + 2] - bak.data[i + 2]);
+      if (delta > 40) borderDamage += 1;
+    }
+  }
+  if (borderDamage > 0) {
+    part10RepairBoundaryWithWidth(ctx, boundary, width);
+  }
+
+  const borderOk =
+    borderChecked === 0 || borderDamage / borderChecked <= 0.02;
+  const score = Math.max(0, Math.min(1, 1 - leftover / Math.max(1, inkBefore)));
+  return { score, leftover, borderOk };
+}
+
+/**
+ * BallonsTranslator-tarzı 3 zincir:
+ * 1) Yüzeysel ***** silme → detektör
+ * 2) Kalan yazı → Telea + hassas ***** → detektör
+ * 3) Nokta/çizgi ince ayar → detektör
+ * Başarı = 1 - leftover/inkBefore ≥ CLEAN_THRESHOLD (%90 test)
  */
 function eraseUntilClean(
   ctx: CanvasRenderingContext2D,
@@ -897,8 +1052,7 @@ function eraseUntilClean(
   const { interior, redzone, stroke, bounds } = boundary;
   if (!bounds) return false;
 
-  // Text-focused crop only (no bubble-wide white fill)
-  const pad = Math.max(2, Math.min(textPx.w, textPx.h) * 0.06);
+  const pad = Math.max(2, Math.min(textPx.w, textPx.h) * 0.08);
   const rx0 = Math.max(0, Math.floor(textPx.x - pad));
   const ry0 = Math.max(0, Math.floor(textPx.y - pad));
   const rx1 = Math.min(width, Math.ceil(textPx.x + textPx.w + pad));
@@ -920,18 +1074,16 @@ function eraseUntilClean(
     stroke,
     kind,
   );
-  // TextBox'ta yazı yoksa veya algı yoksa çeviri yazma (İngilizce üstüne binmesin)
-  if (inkBefore < 12) return false;
+  if (inkBefore < 8) return false;
 
-  let wipedTotal = 0;
+  const pass = (score: number, borderOk: boolean) =>
+    score >= CLEAN_THRESHOLD && borderOk;
 
-  for (let round = 0; round < 5; round += 1) {
+  // ——— ZİNCİR 1: yüzeysel temizlik ———
+  {
     const img = ctx.getImageData(rx0, ry0, rw, rh);
-    const { data } = img;
-
-    // PART 4
     const mask = part4RecognizeTextInk(
-      data,
+      img.data,
       rw,
       rh,
       rx0,
@@ -942,102 +1094,172 @@ function eraseUntilClean(
       redzone,
       stroke,
       kind,
-      round >= 1,
+      false,
     );
-
-    // PART 6
-    if (round === 0 || round === 2 || round === 4) {
-      wipedTotal += part6EraseLetters(data, mask, rw, rh, kind);
-    } else {
-      wipedTotal += part6TeleaPass(
-        data,
-        mask,
-        rw,
-        rh,
-        rx0,
-        ry0,
-        width,
-        height,
-        interior,
-        redzone,
-        stroke,
-      );
-    }
-
+    part6EraseLetters(img.data, mask, rw, rh, kind);
     ctx.putImageData(img, rx0, ry0);
-
-    // PART 7 + 10 — sınır zorunlu geri
     part10RepairBoundaryWithWidth(ctx, boundary, width);
+    const m = measureEraseScore(
+      ctx,
+      rx0,
+      ry0,
+      rw,
+      rh,
+      width,
+      height,
+      redzone,
+      stroke,
+      kind,
+      inkBefore,
+      boundary,
+    );
+    if (pass(m.score, m.borderOk)) return true;
+  }
 
-    // PART 9 — ham mürekkep (solidRect filtresi yok → kalan EN görünür)
-    const after = ctx.getImageData(rx0, ry0, rw, rh);
-    const leftover = countRawInkPixels(
-      after.data,
+  // ——— ZİNCİR 2: detektör kalan buldu → residual silme (Telea + hassas) ———
+  {
+    const img = ctx.getImageData(rx0, ry0, rw, rh);
+    const mask = part4RecognizeTextInk(
+      img.data,
       rw,
       rh,
       rx0,
       ry0,
       width,
       height,
+      interior,
+      redzone,
+      stroke,
+      kind,
+      true,
+    );
+    part6EraseLetters(img.data, mask, rw, rh, kind);
+    part6TeleaPass(
+      img.data,
+      mask,
+      rw,
+      rh,
+      rx0,
+      ry0,
+      width,
+      height,
+      interior,
+      redzone,
+      stroke,
+    );
+    // ikinci residual tur
+    const mask2 = part4RecognizeTextInk(
+      img.data,
+      rw,
+      rh,
+      rx0,
+      ry0,
+      width,
+      height,
+      interior,
+      redzone,
+      stroke,
+      kind,
+      true,
+    );
+    part6TeleaPass(
+      img.data,
+      mask2,
+      rw,
+      rh,
+      rx0,
+      ry0,
+      width,
+      height,
+      interior,
+      redzone,
+      stroke,
+    );
+    ctx.putImageData(img, rx0, ry0);
+    part10RepairBoundaryWithWidth(ctx, boundary, width);
+    const m = measureEraseScore(
+      ctx,
+      rx0,
+      ry0,
+      rw,
+      rh,
+      width,
+      height,
+      redzone,
+      stroke,
+      kind,
+      inkBefore,
+      boundary,
+    );
+    if (pass(m.score, m.borderOk)) return true;
+  }
+
+  // ——— ZİNCİR 3: nokta/çizgi ince ayar ———
+  {
+    const img = ctx.getImageData(rx0, ry0, rw, rh);
+    part6FineSpotErase(
+      img.data,
+      rw,
+      rh,
+      rx0,
+      ry0,
+      width,
+      height,
+      interior,
       redzone,
       stroke,
       kind,
     );
-
-    const bak = boundary.borderBackup;
-    const full = ctx.getImageData(
-      boundary.backupX,
-      boundary.backupY,
-      bak.width,
-      bak.height,
+    // ekstra hassas harf + spot
+    const mask = part4RecognizeTextInk(
+      img.data,
+      rw,
+      rh,
+      rx0,
+      ry0,
+      width,
+      height,
+      interior,
+      redzone,
+      stroke,
+      kind,
+      true,
     );
-    let borderDamage = 0;
-    let borderChecked = 0;
-    for (let y = 0; y < bak.height; y += 1) {
-      for (let x = 0; x < bak.width; x += 1) {
-        const gx = boundary.backupX + x;
-        const gy = boundary.backupY + y;
-        const g = gy * width + gx;
-        if (!redzone[g] && !stroke[g]) continue;
-        borderChecked += 1;
-        const i = (y * bak.width + x) * 4;
-        const delta =
-          Math.abs(full.data[i] - bak.data[i]) +
-          Math.abs(full.data[i + 1] - bak.data[i + 1]) +
-          Math.abs(full.data[i + 2] - bak.data[i + 2]);
-        if (delta > 40) borderDamage += 1;
-      }
-    }
-    if (borderDamage > 0) {
-      part10RepairBoundaryWithWidth(ctx, boundary, width);
-    }
+    part6EraseLetters(img.data, mask, rw, rh, kind);
+    part6FineSpotErase(
+      img.data,
+      rw,
+      rh,
+      rx0,
+      ry0,
+      width,
+      height,
+      interior,
+      redzone,
+      stroke,
+      kind,
+    );
+    ctx.putImageData(img, rx0, ry0);
+    part10RepairBoundaryWithWidth(ctx, boundary, width);
+    const m = measureEraseScore(
+      ctx,
+      rx0,
+      ry0,
+      rw,
+      rh,
+      width,
+      height,
+      redzone,
+      stroke,
+      kind,
+      inkBefore,
+      boundary,
+    );
+    if (pass(m.score, m.borderOk)) return true;
 
-    const borderOk =
-      borderChecked === 0 || borderDamage / borderChecked <= 0.01;
-    const erasedRatio = wipedTotal / Math.max(1, inkBefore);
-    // %99: neredeyse tüm mürekkep gitmiş + gerçekten silme yapılmış + sınır sağlam
-    if (leftover <= 8 && erasedRatio >= 0.85 && borderOk && wipedTotal >= 10) {
-      part10RepairBoundaryWithWidth(ctx, boundary, width);
-      return true;
-    }
+    // Son skor — %90 üstü ise çevir
+    return pass(m.score, m.borderOk);
   }
-
-  part10RepairBoundaryWithWidth(ctx, boundary, width);
-  const finalImg = ctx.getImageData(rx0, ry0, rw, rh);
-  const leftover = countRawInkPixels(
-    finalImg.data,
-    rw,
-    rh,
-    rx0,
-    ry0,
-    width,
-    height,
-    redzone,
-    stroke,
-    kind,
-  );
-  const erasedRatio = wipedTotal / Math.max(1, inkBefore);
-  return leftover <= 8 && erasedRatio >= 0.85 && wipedTotal >= 10;
 }
 
 function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number) {
@@ -1330,9 +1552,10 @@ export async function renderTranslatedPage(
   }
 
   if (painted === 0) {
+    const pct = Math.round(CLEAN_THRESHOLD * 100);
     throw new Error(
       skippedDirty > 0
-        ? `Yazı silme %99 eşiğini geçemedi (${skippedDirty} balon). Temiz orijinal yükleyip tekrar dene.`
+        ? `Yazı silme %${pct} eşiğini geçemedi (${skippedDirty} balon). Temiz orijinal yükleyip 3 zincir silmeyi tekrar dene.`
         : "Balon/yazı algılanamadı. Temiz orijinal yükleyip tekrar dene.",
     );
   }

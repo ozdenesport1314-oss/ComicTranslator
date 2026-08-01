@@ -368,8 +368,8 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              Harf silme + yerel kontrast (beyaz kutu yok). Kalan yazı / aynı dil
-              sızıntısı varsa çeviri yazılmaz.
+              3 zincir: yüzeysel → residual Telea → nokta/çizgi ince ayar. Test
+              eşiği %90; geçen balona çeviri yazılır.
             </p>
           </div>
 
