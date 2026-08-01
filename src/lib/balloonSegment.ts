@@ -95,8 +95,12 @@ export function floodPaper(
 }
 
 /**
- * Dolgunun çevresindeki koyu çizgi oranı. Gerçek balonun her yanında balon
- * çizgisi vardır; panele sızmış dolgunun çevresi karışıktır.
+ * Dolgunun çevresindeki balon çizgisi oranı. Gerçek balonun her yanında çizgi
+ * vardır; panele sızmış dolgunun çevresi karışıktır.
+ *
+ * Sıkı kağıt eşiğinde dolgunun İLK komşusu çizgi değil antialias grisi olur;
+ * bu yüzden dışa doğru birkaç piksel bakılır, yoksa gerçek balonlar reddedilip
+ * temizlik harf moduna düşüyor ve balon içinde hayalet yazı kalıyordu.
  */
 export function strokeRingRatio(
   lum: Float32Array,
@@ -104,6 +108,7 @@ export function strokeRingRatio(
   rh: number,
   mask: Uint8Array,
   mode: "light" | "dark",
+  reach = 3,
 ): number {
   let dark = 0;
   let total = 0;
@@ -121,10 +126,19 @@ export function strokeRingRatio(
       const nx = x + dx;
       const ny = y + dy;
       if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
-      const np = ny * rw + nx;
-      if (mask[np]) continue;
+      if (mask[ny * rw + nx]) continue;
       total += 1;
-      if (isStroke(lum[np])) dark += 1;
+      for (let step = 1; step <= reach; step += 1) {
+        const sx = x + dx * step;
+        const sy = y + dy * step;
+        if (sx < 0 || sy < 0 || sx >= rw || sy >= rh) break;
+        const sp = sy * rw + sx;
+        if (mask[sp]) break;
+        if (isStroke(lum[sp])) {
+          dark += 1;
+          break;
+        }
+      }
     }
   }
   return total ? dark / total : 0;

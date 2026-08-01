@@ -180,6 +180,28 @@ const check = (name: string, pass: boolean, detail: string) =>
   );
 }
 
+// --- Senaryo 7: antialias kenarlı balon + gri köprü (sıkı eşik şart) ---
+// Gerçek sayfalarda balon çizgisinin kenarı yumuşaktır. Sıkı eşikte dolgunun
+// ilk komşusu çizgi değil antialias grisi olur; çizgi kontrolü dışa bakmazsa
+// gerçek balon reddedilir ve balonda hayalet yazı kalır.
+{
+  const scene = blankScene(300, 220, 252);
+  fillEllipse(scene, 150, 110, 80, 57, 150); // antialias halkası
+  fillEllipse(scene, 150, 110, 78, 55, 0); // balon çizgisi
+  fillEllipse(scene, 150, 110, 75, 52, 152); // iç antialias
+  fillEllipse(scene, 150, 110, 73, 50, 250); // balon içi kağıt
+  fillRect(scene, 146, 45, 154, 70, 150); // çizgiyi kesen gri köprü
+  addTextLines(scene, [[110, 98, 190, 122]]);
+  scene.text = { x0: 110, y0: 98, x1: 190, y1: 122 };
+  const mask = findEnclosedBalloon(scene.lum, scene.rw, scene.rh, "light", scene.text);
+  const stats = mask ? maskStats(mask, scene.rw) : null;
+  check(
+    "antialias kenarlı balon sıkı eşikle kabul edildi",
+    !!stats && stats.minX >= 70 && stats.maxX <= 230 && stats.area < 14000,
+    stats ? `alan=${stats.area} bbox=${stats.minX}..${stats.maxX}` : "maske yok",
+  );
+}
+
 let failed = 0;
 for (const r of results) {
   if (!r.pass) failed += 1;

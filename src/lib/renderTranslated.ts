@@ -507,7 +507,10 @@ function letterOnlyBoundary(
     for (const p of pixels) keep[p] = 1;
   }
 
-  const grown = dilateMask(keep, rw, rh);
+  // Harfin kendisi silinip antialias halkası kalınca balonda soluk hayalet yazı
+  // görünüyordu. Harfe 2px mesafedeki "tam kağıt olmayan" pikseller de silinir.
+  const grown = dilateMask(dilateMask(keep, rw, rh), rw, rh);
+  const paperLum = luminance(kind.fill.r, kind.fill.g, kind.fill.b);
   const interior = new Uint8Array(width * height);
   let minX = rw;
   let minY = rh;
@@ -517,10 +520,9 @@ function letterOnlyBoundary(
     for (let x = 0; x < rw; x += 1) {
       const p = y * rw + x;
       if (!grown[p]) continue;
-      // Antialias halkası: açık kağıdı maskeye alma (beyaz leke önlemi)
-      if (!keep[p] && (kind.mode === "light" ? lum[p] > 165 : lum[p] < 95)) {
-        continue;
-      }
+      const halo =
+        kind.mode === "light" ? lum[p] < paperLum - 8 : lum[p] > paperLum + 8;
+      if (!keep[p] && !halo) continue;
       interior[(y0 + y) * width + (x0 + x)] = 1;
       if (x < minX) minX = x;
       if (y < minY) minY = y;
@@ -1225,10 +1227,10 @@ function tryUniformBubbleClean(
 
   if (!inside) return false;
   if (!force) {
-    const coverage = inside / Math.max(1, rw * rh);
-    const paperRatio = paper / inside;
-    // Yoğun artwork bu kapıdan geçmez; kağıt ağırlıklı balonlar geçer.
-    if (coverage < 0.2 || paperRatio < 0.48) return false;
+    // Eski kapı crop alanına bakıyordu; arama penceresi büyüdüğü için gerçek
+    // balonlar da elenip harf-silme moduna düşüyor, geriye hayalet yazı
+    // kalıyordu. Tek anlamlı ölçüt: interior kağıt ağırlıklı mı?
+    if (paper / inside < 0.5) return false;
   }
 
   const img = ctx.getImageData(backupX, backupY, rw, rh);
