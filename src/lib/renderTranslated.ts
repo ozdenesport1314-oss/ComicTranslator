@@ -1,5 +1,6 @@
 import {
   findEnclosedBalloons,
+  inkNearPaper,
   letterDomain,
   type TextRect,
 } from "./balloonSegment";
@@ -153,12 +154,13 @@ function clipTextInsideBubble(text: PxBox, bubble: PxBox): PxBox {
   const y = Math.max(text.y, bubble.y + bubble.h * 0.03);
   const r = Math.min(text.x + text.w, bubble.x + bubble.w * 0.97);
   const b = Math.min(text.y + text.h, bubble.y + bubble.h * 0.97);
-  return {
-    x,
-    y,
-    w: Math.max(4, r - x),
-    h: Math.max(4, b - y),
-  };
+  const w = r - x;
+  const h = b - y;
+  // Gemini bubbleBox bazen tamamen yanlış yerde; kesişim çöküyorsa metin
+  // kutusuna güven — aksi halde HARDLY gibi balonlar yanlış/boş konuma kayıp
+  // temizlenmeden atılıyordu.
+  if (w < 4 || h < 4 || w * h < text.w * text.h * 0.35) return text;
+  return { x, y, w, h };
 }
 
 function estimateLineCount(text: string): number {
@@ -676,6 +678,30 @@ function part3DefineBoundary(
   // Interior'dan redzone çıkar (kenar bandı yazılamaz/silinemez)
   for (let i = 0; i < interior.length; i += 1) {
     if (redzone[i]) interior[i] = 0;
+  }
+
+  // Flood yalnızca bir balonu bulduysa (veya metnin bir kısmını kaçırdıysa)
+  // yazı kutusundaki kağıt-üstü mürekkebi de interior'a ekle. Bu, komşu
+  // balonların yanlış birleşmesinde HARDLY'nin yeşilsiz kalmasını engeller.
+  const letterMask =
+    letterDomain(lum, rw, rh, mode, text, {
+      cut: kind.cut,
+      paperLum: luminance(kind.fill.r, kind.fill.g, kind.fill.b),
+    }) ??
+    inkNearPaper(lum, rw, rh, mode, text, {
+      cut: kind.cut,
+      paperLum: luminance(kind.fill.r, kind.fill.g, kind.fill.b),
+    });
+  if (letterMask) {
+    for (let y = 0; y < rh; y += 1) {
+      for (let x = 0; x < rw; x += 1) {
+        const p = y * rw + x;
+        if (!letterMask[p]) continue;
+        const g = (y0 + y) * width + (x0 + x);
+        if (redzone[g] || stroke[g]) continue;
+        interior[g] = 1;
+      }
+    }
   }
 
   let minX = rw;
@@ -1634,7 +1660,12 @@ function unionBox(a: PxBox, b: PxBox): PxBox {
 /**
  * Aynı balondaki parça metinleri tek iş haline getirir.
  * Örn. “HARDLY.” ve altındaki devam metni ayrı çevrilirse aynı balona iki kez
- * yazılıp çarpışıyordu. bubbleBox IoU yüksekse tek metin / tek temizlik olur.
+ * yazılıp çarpışıyordu.
+ *
+ * ÖNEMLİ: Birleştirme bubbleBox'a göre YAPILMAZ. Gemini'nin balon kutuları
+ * komşu balonlarda sıkça örtüşür; o zaman HARDLY + yanındaki kutu tek iş
+ * olur, flood yalnızca birini bulur, diğeri Redzone'da yeşilsiz kalır.
+ * Birleştirme yalnızca metin kutuları gerçekten çakışınca yapılır.
  */
 function groupBubbleInputs(
   bubbles: BubbleTranslation[],
@@ -1669,8 +1700,8 @@ function groupBubbleInputs(
     );
     const existing = grouped.find(
       (g) =>
-        boxIou(g.bubblePx, bubblePx) >= 0.5 ||
-        boxOverlapOfSmaller(g.bubblePx, bubblePx) >= 0.68,
+        boxIou(g.textPx, textPx) >= 0.4 ||
+        boxOverlapOfSmaller(g.textPx, textPx) >= 0.6,
     );
     if (!existing) {
       grouped.push({ bubble: { ...bubble }, bubblePx, textPx });
