@@ -311,67 +311,119 @@ function detectBubbleBoundary(
   return { interior, redzone, bounds, fill, mode };
 }
 
-/** STEP: yazı maskelemesi — only inside bubble boundary mask */
-function maskTextInsideBoundary(
+/**
+ * STEP: yazıları harf harf maskele (a b c → * * *)
+ * - Sadece mürekkep / harf bileşenlerini siler
+ * - Tüm balonu beyaza BOYAMAZ
+ * - Balon sınırı (interior) dışına ASLA çıkmaz
+ */
+function maskLettersInsideBoundary(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
   textPx: PxBox,
   interior: Uint8Array,
+  mode: "light" | "dark",
   fill: Rgb,
 ) {
-  // Expand text a bit so no glyph remnants remain, still clipped by interior mask
-  const x0 = Math.max(0, Math.floor(textPx.x - textPx.w * 0.08));
-  const y0 = Math.max(0, Math.floor(textPx.y - textPx.h * 0.08));
-  const x1 = Math.min(width, Math.ceil(textPx.x + textPx.w * 1.08));
-  const y1 = Math.min(height, Math.ceil(textPx.y + textPx.h * 1.08));
+  // Tight text region — small pad only for glyph edges, not whole bubble
+  const pad = Math.max(2, Math.min(textPx.w, textPx.h) * 0.03);
+  const x0 = Math.max(0, Math.floor(textPx.x - pad));
+  const y0 = Math.max(0, Math.floor(textPx.y - pad));
+  const x1 = Math.min(width, Math.ceil(textPx.x + textPx.w + pad));
+  const y1 = Math.min(height, Math.ceil(textPx.y + textPx.h + pad));
   const rw = x1 - x0;
   const rh = y1 - y0;
   if (rw < 2 || rh < 2) return;
 
   const img = ctx.getImageData(x0, y0, rw, rh);
   const { data } = img;
+  const n = rw * rh;
+  const lum = new Float32Array(n);
+  for (let p = 0, i = 0; p < n; p += 1, i += 4) {
+    lum[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  }
 
-  for (let row = 0; row < rh; row += 1) {
-    for (let col = 0; col < rw; col += 1) {
-      const gx = x0 + col;
-      const gy = y0 + row;
-      if (!interior[gy * width + gx]) continue; // MUST stay inside bubble boundary
-      const i = (row * rw + col) * 4;
-      data[i] = fill.r;
-      data[i + 1] = fill.g;
-      data[i + 2] = fill.b;
-      data[i + 3] = 255;
+  // Ink vs paper depending on bubble type
+  const ink = new Uint8Array(n);
+  for (let p = 0; p < n; p += 1) {
+    const gx = x0 + (p % rw);
+    const gy = y0 + Math.floor(p / rw);
+    if (!interior[gy * width + gx]) continue; // bubble boundary clamp
+    const isInk = mode === "light" ? lum[p] < 175 : lum[p] > 70;
+    if (isInk) ink[p] = 1;
+  }
+
+  // Connected components = individual letters/glyphs
+  const labels = new Int32Array(n).fill(-1);
+  let label = 0;
+  const stack: number[] = [];
+  const components: number[][] = [];
+
+  for (let start = 0; start < n; start += 1) {
+    if (!ink[start] || labels[start] >= 0) continue;
+    const pixels: number[] = [];
+    labels[start] = label;
+    stack.push(start);
+    while (stack.length) {
+      const p = stack.pop() as number;
+      pixels.push(p);
+      const y = Math.floor(p / rw);
+      const x = p - y * rw;
+      for (const [dx, dy] of [
+        [1, 0],
+        [-1, 0],
+        [0, 1],
+        [0, -1],
+        [1, 1],
+        [1, -1],
+        [-1, 1],
+        [-1, -1],
+      ] as const) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
+        const np = ny * rw + nx;
+        if (!ink[np] || labels[np] >= 0) continue;
+        labels[np] = label;
+        stack.push(np);
+      }
+    }
+    // Drop tiny noise speckles; keep real letter blobs
+    if (pixels.length >= 6) components.push(pixels);
+    label += 1;
+  }
+
+  // Dilate each letter slightly, then paint only those pixels with paper color
+  const dilate = 1;
+  const wipe = new Uint8Array(n);
+  for (const pixels of components) {
+    for (const p of pixels) {
+      const y = Math.floor(p / rw);
+      const x = p - y * rw;
+      for (let dy = -dilate; dy <= dilate; dy += 1) {
+        for (let dx = -dilate; dx <= dilate; dx += 1) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
+          const gx = x0 + nx;
+          const gy = y0 + ny;
+          if (!interior[gy * width + gx]) continue;
+          wipe[ny * rw + nx] = 1;
+        }
+      }
     }
   }
-  ctx.putImageData(img, x0, y0);
-}
 
-/** Fill full bubble interior (shape-matched) */
-function fillBubbleInterior(
-  ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-  interior: Uint8Array,
-  bounds: PxBox,
-  fill: Rgb,
-) {
-  const x0 = Math.max(0, Math.floor(bounds.x));
-  const y0 = Math.max(0, Math.floor(bounds.y));
-  const rw = Math.min(width - x0, Math.ceil(bounds.w));
-  const rh = Math.min(height - y0, Math.ceil(bounds.h));
-  const img = ctx.getImageData(x0, y0, rw, rh);
-  const { data } = img;
-  for (let row = 0; row < rh; row += 1) {
-    for (let col = 0; col < rw; col += 1) {
-      if (!interior[(y0 + row) * width + (x0 + col)]) continue;
-      const i = (row * rw + col) * 4;
-      data[i] = fill.r;
-      data[i + 1] = fill.g;
-      data[i + 2] = fill.b;
-      data[i + 3] = 255;
-    }
+  for (let p = 0; p < n; p += 1) {
+    if (!wipe[p]) continue;
+    const i = p * 4;
+    data[i] = fill.r;
+    data[i + 1] = fill.g;
+    data[i + 2] = fill.b;
+    data[i + 3] = 255;
   }
+
   ctx.putImageData(img, x0, y0);
 }
 
@@ -529,13 +581,12 @@ function drawDebug(
 
 /**
  * Zincir:
- * 1) Yazıları algıla (API → textBox)
- * 2) Balonları algıla (API → bubbleBox)
- * 3) Balon sınırlarını algıla (flood-fill interior)
- * 4) Yazı maskelemesi balon sınırları içinde
- * 5) Yazılar maskelenir
- * 6) Balon sınırları tekrar algılanır
- * 7) O sınırlar içine çeviri yazılır
+ * 1) Yazıları algıla
+ * 2) Balonları algıla
+ * 3) Balon sınırını algıla
+ * 4) Yazıları HARF HARF maskele (balonu boyama)
+ * 5) Balon sınırını tekrar algıla
+ * 6) Çeviriyi balon içine yaz
  */
 export async function renderTranslatedPage(
   imageDataUrl: string,
@@ -549,7 +600,6 @@ export async function renderTranslatedPage(
   const height = img.naturalHeight || img.height;
   if (!width || !height) throw new Error("Görsel boyutları okunamadı");
 
-  // Zemin
   const zemin = document.createElement("canvas");
   zemin.width = width;
   zemin.height = height;
@@ -557,43 +607,63 @@ export async function renderTranslatedPage(
   if (!ctx) throw new Error("Canvas desteklenmiyor");
   ctx.drawImage(img, 0, 0, width, height);
 
-  // 1 + 2: yazı + balon algısı API'den geliyor; okuma sırası korunur
   const ordered = [...bubbles].sort((a, b) => a.readingOrder - b.readingOrder);
   let painted = 0;
 
   for (const bubble of ordered) {
     if (!bubble.translated?.trim() || !bubble.box) continue;
 
-    // 2) balon kutusu
+    // 1-2) yazı + balon
     const bubblePx = toPx(resolveBubbleBox(bubble), width, height);
-    // 1) yazı kutusu — balonun dışına taşmasın
     const textPx = clipTextInsideBubble(toPx(bubble.box, width, height), bubblePx);
 
-    // 3) balon sınırlarını algıla
+    // 3) balon sınırı
     let seg = detectBubbleBoundary(ctx, width, height, bubblePx, textPx);
     if (!seg.bounds) continue;
 
-    // 4 + 5: yazı maskelemesi SADECE balon sınırı içinde
-    maskTextInsideBoundary(ctx, width, height, textPx, seg.interior, seg.fill);
+    // 4) harf harf maskele — tüm balonu boyama
+    maskLettersInsideBoundary(
+      ctx,
+      width,
+      height,
+      textPx,
+      seg.interior,
+      seg.mode,
+      seg.fill,
+    );
 
-    // 6) maskelemeden sonra sınırları tekrar algıla (temiz iç alan)
+    // 5) sınır tekrar
     seg = detectBubbleBoundary(ctx, width, height, bubblePx, textPx);
     if (!seg.bounds) continue;
-
-    // Tüm balon içini şekle uygun doldur
-    fillBubbleInterior(ctx, width, height, seg.interior, seg.bounds, seg.fill);
 
     if (options.showRedzone) {
       drawDebug(ctx, width, height, bubblePx, textPx, seg.interior, seg.redzone);
     }
 
-    // 7) çeviriyi yeniden algılanan sınırların içine yaz
+    // 6) çeviriyi balon içine yaz (yerleşim textBox merkezine yakın, sınır içinde)
+    const place: PxBox = {
+      x: Math.max(seg.bounds.x, textPx.x),
+      y: Math.max(seg.bounds.y, textPx.y),
+      w:
+        Math.min(seg.bounds.x + seg.bounds.w, textPx.x + textPx.w) -
+        Math.max(seg.bounds.x, textPx.x),
+      h:
+        Math.min(seg.bounds.y + seg.bounds.h, textPx.y + textPx.h) -
+        Math.max(seg.bounds.y, textPx.y),
+    };
+    if (place.w < 8 || place.h < 8) {
+      place.x = seg.bounds.x;
+      place.y = seg.bounds.y;
+      place.w = seg.bounds.w;
+      place.h = seg.bounds.h;
+    }
+
     writeTranslationInsideBubble(
       ctx,
       bubble.translated,
       bubble.original,
       textPx,
-      seg.bounds,
+      place,
       seg.mode,
     );
     painted += 1;

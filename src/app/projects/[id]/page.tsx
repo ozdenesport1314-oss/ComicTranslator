@@ -368,8 +368,8 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              Zincir: yazı → balon → sınır → sınır içi maske → sınır yeniden →
-              çeviri. Redzone algıyı gösterir.
+              Zincir: yazı → balon → sınır → harf harf maske → sınır yeniden →
+              çeviri. Balon boyanmaz.
             </p>
           </div>
 
