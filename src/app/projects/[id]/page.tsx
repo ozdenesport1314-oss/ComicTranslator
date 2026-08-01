@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { UploadDropzone } from "@/components/UploadDropzone";
+import { cleanPageWithService } from "@/lib/cleanClient";
 import { getProject, saveProject } from "@/lib/db";
 import { fileToPages } from "@/lib/pdf";
 import { reapplyBubblesToImage, translatePageImage } from "@/lib/translateClient";
@@ -167,6 +168,34 @@ export default function ProjectDetailPage() {
     a.click();
   }
 
+  async function cleanWithModel() {
+    if (!project || !selectedPage) return;
+    setBusy(true);
+    setError(null);
+    setViewMode("translated");
+    try {
+      const result = await cleanPageWithService(selectedPage.imageDataUrl);
+      const latest = (await getProject(params.id)) ?? project;
+      await persist({
+        ...latest,
+        pages: latest.pages.map((p) =>
+          p.id === selectedPage.id
+            ? {
+                ...p,
+                translatedImageDataUrl: result.imageDataUrl,
+                status: "done",
+                error: undefined,
+              }
+            : p,
+        ),
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Model temizliği başarısız");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function reapplyOverlay() {
     if (!project || !selectedPage || selectedPage.bubbles.length === 0) return;
     setBusy(true);
@@ -320,6 +349,14 @@ export default function ProjectDetailPage() {
               <button type="button" className="btn btn-ghost" onClick={downloadTranslated}>
                 İndir
               </button>
+              <button
+                type="button"
+                className="btn btn-accent"
+                disabled={busy}
+                onClick={() => void cleanWithModel()}
+              >
+                Model ile temizle
+              </button>
               {selectedPage.bubbles.length > 0 && (
                 <button
                   type="button"
@@ -327,7 +364,7 @@ export default function ProjectDetailPage() {
                   disabled={busy}
                   onClick={() => void reapplyOverlay()}
                 >
-                Temizliği uygula
+                  Temizliği uygula (eski)
                 </button>
               )}
             </div>
@@ -368,9 +405,10 @@ export default function ProjectDetailPage() {
               Baloncuklar
             </h2>
             <p className="muted mt-1 text-sm">
-              Yalnızca balon temizliği. Balon, Gemini kutusu yerine kendi kapalı
-              kenarından bulunur; kenar redzone ile korunur. Kapalı balon
-              yoksa sadece harf pikselleri silinir. Yeni metin yazılmaz.
+              “Model ile temizle”, sayfayı manga üzerinde eğitilmiş bir yazı
+              segmentasyon modeline gönderir; maskelenen harfler inpaint ile
+              doldurulur. Eski buton, tarayıcı içi sezgisel temizliği çalıştırır.
+              Yeni metin yazılmaz.
             </p>
           </div>
 
